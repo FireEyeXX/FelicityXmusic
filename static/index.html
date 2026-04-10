@@ -465,6 +465,14 @@
             <option value="dj">DJ Player (3-band EQ transitions)</option>
           </select>
         </div>
+        <div class="setting-group classic-only" style="display:none;">
+          <label class="setting-label">Prefetch</label>
+          <select class="setting-select" id="settingPrefetchEnabled">
+            <option value="1" selected>On — pre-download next tracks</option>
+            <option value="0">Off — stream only when needed</option>
+          </select>
+          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Pre-downloads upcoming tracks for faster playback. Turn off to save data or if playback stutters.</p>
+        </div>
         <div class="setting-group" id="deviceDlnaRow" style="display:none;">
           <label class="setting-label">DLNA Renderer URL</label>
           <input class="setting-input" id="settingDeviceDlnaUrl" type="text" placeholder="http://192.168.1.95:8888/upnp_descriptor_0">

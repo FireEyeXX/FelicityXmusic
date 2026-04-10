@@ -180,6 +180,8 @@ async function _saveDeviceSettings() {
     // Save player engine to localStorage
     const engine = $('#settingPlayerEngine')?.value || 'classic';
     localStorage.setItem('ms_player_engine', engine);
+    const pf = $('#settingPrefetchEnabled')?.value || '1';
+    localStorage.setItem('ms_prefetch_enabled', pf);
     showToast('Device settings saved — reload to switch player engine');
     _loadMyDevices();
     _toggleDjSection();
@@ -192,8 +194,12 @@ function _toggleDjSection() {
   const engine = $('#settingPlayerEngine')?.value || localStorage.getItem('ms_player_engine') || 'classic';
   const section = $('#djModeSection');
   if (section) section.style.display = ['crossfade', 'dj'].includes(engine) ? '' : 'none';
-  // Show DJ v3-only settings only for DJ engine
   $$('.dj-v3-only').forEach(el => { el.style.display = engine === 'dj' ? '' : 'none'; });
+  // Show prefetch toggle only for Classic player
+  $$('.classic-only').forEach(el => { el.style.display = engine === 'classic' ? '' : 'none'; });
+  // Load prefetch setting
+  const pfEl = $('#settingPrefetchEnabled');
+  if (pfEl) pfEl.value = localStorage.getItem('ms_prefetch_enabled') || '1';
 }
 
 const DJ_DEFAULTS = {

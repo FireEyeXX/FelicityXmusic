@@ -115,8 +115,10 @@ export function loadAndPlay() {
     }
     audio.load();
     audio.play().catch(() => {});
-    // Prefetch starts on 'playing' event (after current track buffers)
-    prefetchCleanup(store.playerQueue, store.playerIndex);
+    // Prefetch cleanup + starts on 'playing' event (if enabled)
+    if (localStorage.getItem('ms_prefetch_enabled') !== '0') {
+      prefetchCleanup(store.playerQueue, store.playerIndex);
+    }
   }
   showPlayerBar();
   updatePlayPauseIcon(true);
@@ -520,9 +522,9 @@ export function init() {
       if (item) _ab().onPlay(item.name || '', item.artist || '');
     }
   });
-  // 'playing' fires after buffering — safe to start prefetch without competing
+  // 'playing' fires after buffering — start prefetch if enabled
   audio.addEventListener('playing', () => {
-    resumePrefetch();
+    if (localStorage.getItem('ms_prefetch_enabled') !== '0') resumePrefetch();
   });
   audio.addEventListener('pause', () => {
     updatePlayPauseIcon(false);
