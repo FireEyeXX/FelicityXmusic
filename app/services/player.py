@@ -128,14 +128,16 @@ def delete_album_files(artist: str, album: str) -> int:
 
 async def resolve_stream(name: str, artist: str) -> dict | None:
     """Resolve a track to a streamable source. Local file > Navidrome > YouTube."""
+    import asyncio
     # Check cache first
     key = _cache_key(name, artist)
     cached = _url_cache.get(key)
     if cached and time.time() - cached[1] < _URL_TTL:
         return cached[0]
 
-    # Try local downloaded files first
-    result = _resolve_local_file(name, artist)
+    # Try local downloaded files first (run in thread pool — rglob blocks on NAS)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _resolve_local_file, name, artist)
     if result:
         _url_cache[key] = (result, time.time())
         return result
