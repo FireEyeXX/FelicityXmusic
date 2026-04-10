@@ -6,7 +6,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, prefetchUpcoming, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, prefetchUpcoming, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
 
 const audio = $('#audioElement');
 function _ab() { return window.AndroidBridge || null; }
@@ -76,7 +76,7 @@ export function addToQueue(items, playNow = false) {
 }
 
 // ── Load and Play Current Track ──
-export function loadAndPlay() {
+export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
@@ -106,7 +106,12 @@ export function loadAndPlay() {
       .then(() => { /* cast started */ })
       .catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; });
   } else {
-    const cached = getCachedUrl(cleanName, cleanArtist);
+    let cached = getCachedUrl(cleanName, cleanArtist);
+    // If prefetch is downloading this track, wait for it (avoids competing parallel stream)
+    if (!cached && localStorage.getItem('ms_prefetch_enabled') !== '0') {
+      const waited = await waitForCache(cleanName, cleanArtist, 8000);
+      if (waited) cached = waited;
+    }
     if (cached) {
       audio.src = cached;
     } else {
@@ -561,9 +566,14 @@ export function init() {
       _ab().onProgress(Math.floor(audio.currentTime * 1000), Math.floor(dur * 1000));
     }
   });
-  audio.addEventListener('error', () => {
-    showToast('Stream error, skipping...');
-    setTimeout(() => nextTrack(), 1000);
+  audio.addEventListener('error', (e) => {
+    if (!audio.src) return; // ignore error from cleared src
+    const code = audio.error?.code || '?';
+    const msg = audio.error?.message || '';
+    const src = audio.src?.substring(0, 60) || 'none';
+    showToast(`Stream error (${code}): ${msg || src}`);
+    // Don't chain-skip — wait 2s
+    setTimeout(() => nextTrack(), 2000);
   });
 
   // Controls

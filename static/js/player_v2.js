@@ -7,7 +7,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
 import { fetchDjData, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
 
 // ── Dual-deck Web Audio API crossfade engine with DJ mixing ──
@@ -366,7 +366,8 @@ export function loadAndPlay() {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const cached = getCachedUrl(cleanName, cleanArtist);
+    let cached = getCachedUrl(cleanName, cleanArtist);
+    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
     const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
 
     const currentDeck = _activeDeckEl();
@@ -647,7 +648,8 @@ export function playRecTrack(item) {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const cached = getCachedUrl(cleanName, cleanArtist);
+    let cached = getCachedUrl(cleanName, cleanArtist);
+    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
     const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {

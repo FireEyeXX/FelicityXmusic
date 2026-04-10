@@ -38,6 +38,26 @@ export function getCachedUrl(name, artist) {
   return entry ? entry.blobUrl : null;
 }
 
+/** If track is currently being prefetched, wait for it (max 10s). Returns blob URL or null. */
+export async function waitForCache(name, artist, timeoutMs = 10000) {
+  const key = _key(name, artist);
+  // Already cached
+  if (_cache.has(key)) return _cache.get(key).blobUrl;
+  // Not being fetched — can't wait
+  if (!_fetching.has(key)) return null;
+  // Wait for prefetch to complete
+  const start = Date.now();
+  return new Promise(resolve => {
+    const check = () => {
+      if (_cache.has(key)) return resolve(_cache.get(key).blobUrl);
+      if (!_fetching.has(key)) return resolve(null); // fetch failed
+      if (Date.now() - start > timeoutMs) return resolve(null); // timeout
+      setTimeout(check, 200);
+    };
+    check();
+  });
+}
+
 /** Get prefetch status for a track. */
 export function getStatus(name, artist) {
   const key = _key(name, artist);
