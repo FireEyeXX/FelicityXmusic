@@ -376,10 +376,14 @@ export function loadAndPlay() {
       if (!_inDjData) {
         fetchDjData(cleanName, cleanArtist).then(d => { _inDjData = d; }).catch(() => {});
       }
-      const nextDeck = _inactiveDeckEl();
+      // IMPORTANT: call _startCrossfade BEFORE setting src on the next deck.
+      // _startCrossfade's rapid-skip handler clears _fadingOutDeck.src, and during
+      // a rapid skip _fadingOutDeck IS the inactive deck we're about to load.
+      // If we set src first, the rapid-skip handler would clear it, causing silence.
+      _startCrossfade(!!cached); // pass seekable flag — also swaps _activeDeck
+      const nextDeck = _activeDeckEl(); // after swap, the NEW active deck is the one to load
       nextDeck.src = src;
       nextDeck.load();
-      _startCrossfade(!!cached); // pass seekable flag
       nextDeck.play().catch(() => {});
     } else {
       // Cold start — nothing currently playing
@@ -648,11 +652,11 @@ export function playRecTrack(item) {
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {
       pausePrefetch();
-      const nextDeck = _inactiveDeckEl();
+      _startCrossfade();
+      const nextDeck = _activeDeckEl(); // after swap
       nextDeck.src = src;
       nextDeck.load();
       nextDeck.play().catch(() => {});
-      _startCrossfade();
     } else {
       if (_crossfading && _fadingOutDeck) {
         resetDeckAfterTransition(_deckDesc(_fadingOutDeck));

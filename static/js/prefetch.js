@@ -101,6 +101,12 @@ async function _startFetch(entry) {
     const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken });
     const res = await apiFetch(`/api/player/stream?${params}`, { signal: controller.signal });
     if (!res.ok) { _fetching.delete(entry.key); _processNext(); return; }
+    // Validate content-type is audio — reject error pages served with 200 status
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (ct && !ct.startsWith('audio/') && !ct.startsWith('application/octet-stream')
+        && !ct.startsWith('video/')) {
+      _fetching.delete(entry.key); _processNext(); return;
+    }
 
     // Track download progress via ReadableStream
     const total = parseInt(res.headers.get('content-length')) || 0;
