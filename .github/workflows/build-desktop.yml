@@ -192,12 +192,7 @@ jobs:
 
           # FileProvider paths config
           mkdir -p "$RES/xml"
-          cat > "$RES/xml/file_provider_paths.xml" << 'XMLEOF'
-<?xml version="1.0" encoding="utf-8"?>
-<paths>
-    <cache-path name="updates" path="updates/" />
-</paths>
-XMLEOF
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<paths>' '    <cache-path name="updates" path="updates/" />' '</paths>' > "$RES/xml/file_provider_paths.xml"
 
           # MainActivity
           MAIN_ACT=$(find "$GEN" -name "MainActivity.kt" | head -1)
