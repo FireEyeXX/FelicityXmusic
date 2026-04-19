@@ -183,10 +183,22 @@ jobs:
               <uses-permission android:name="android.permission.WAKE_LOCK" />\
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
-          # Register AudioService inside <application>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />' "$MANIFEST"
+          # Register AudioService + FileProvider inside <application>
           sed -i '/<\/application>/i \
-              <service android:name=".AudioService" android:exported="false" android:foregroundServiceType="mediaPlayback" />' "$MANIFEST"
+              <service android:name=".AudioService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\
+              <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_provider_paths" /></provider>' "$MANIFEST"
+
+          # FileProvider paths config
+          mkdir -p "$RES/../xml"
+          cat > "$RES/../xml/file_provider_paths.xml" << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="updates" path="updates/" />
+          </paths>
+          XMLEOF
+          sed -i 's/^          //' "$RES/../xml/file_provider_paths.xml"
 
           # MainActivity
           MAIN_ACT=$(find "$GEN" -name "MainActivity.kt" | head -1)
@@ -196,6 +208,7 @@ jobs:
           package $PACKAGE
 
           import android.content.Intent
+          import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.os.Handler
@@ -204,9 +217,13 @@ jobs:
           import android.webkit.JavascriptInterface
           import android.webkit.WebView
           import androidx.activity.enableEdgeToEdge
+          import androidx.core.content.FileProvider
           import androidx.core.view.ViewCompat
           import androidx.core.view.WindowInsetsCompat
+          import java.io.File
           import java.lang.ref.WeakReference
+          import java.net.HttpURLConnection
+          import java.net.URL
 
           class MainActivity : TauriActivity() {
               companion object {
@@ -251,6 +268,48 @@ jobs:
                           putExtra("position", positionMs)
                           putExtra("duration", durationMs)
                       })
+                  }
+
+                  @JavascriptInterface
+                  fun installApk(downloadUrl: String) {
+                      Thread {
+                          try {
+                              evaluateJs("window._apkProgress && window._apkProgress(0, 'Downloading...')")
+                              val updateDir = File(cacheDir, "updates")
+                              updateDir.mkdirs()
+                              val apkFile = File(updateDir, "update.apk")
+                              val conn = URL(downloadUrl).openConnection() as HttpURLConnection
+                              conn.instanceFollowRedirects = true
+                              conn.connect()
+                              val total = conn.contentLength.toLong()
+                              var downloaded = 0L
+                              conn.inputStream.use { input ->
+                                  apkFile.outputStream().use { output ->
+                                      val buf = ByteArray(8192)
+                                      while (true) {
+                                          val n = input.read(buf)
+                                          if (n < 0) break
+                                          output.write(buf, 0, n)
+                                          downloaded += n
+                                          if (total > 0) {
+                                              val pct = (downloaded * 100 / total).toInt()
+                                              evaluateJs("window._apkProgress && window._apkProgress($pct, 'Downloading: ${downloaded / 1024}/${total / 1024} KB')")
+                                          }
+                                      }
+                                  }
+                              }
+                              conn.disconnect()
+                              evaluateJs("window._apkProgress && window._apkProgress(100, 'Installing...')")
+                              val uri = FileProvider.getUriForFile(this@MainActivity, "${'$'}{packageName}.fileprovider", apkFile)
+                              val intent = Intent(Intent.ACTION_VIEW).apply {
+                                  setDataAndType(uri, "application/vnd.android.package-archive")
+                                  flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                              }
+                              startActivity(intent)
+                          } catch (e: Exception) {
+                              evaluateJs("window._apkProgress && window._apkProgress(-1, 'Failed: ${e.message}')")
+                          }
+                      }.start()
                   }
               }
 

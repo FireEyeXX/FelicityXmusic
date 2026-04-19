@@ -1015,11 +1015,46 @@ try {
             if (m) sha = m[1];
           }
           var link = document.getElementById('appUpdateLink');
-          link.onclick = function() {
-            localStorage.setItem('app_installed_version', latest);
-            downloadApp(file, link);
-            return false;
-          };
+          var isTauri = !!window.__TAURI__;
+          var isAndroid = /android/i.test(navigator.userAgent);
+          var downloadUrl = 'https://github.com/lucashanak/music-seeker/releases/latest/download/' + file;
+          if (isTauri && !isAndroid) {
+            // macOS Tauri — auto-install via Rust command
+            link.textContent = 'Install';
+            link.onclick = function() {
+              link.disabled = true;
+              link.textContent = 'Installing...';
+              window.__TAURI__.core.invoke('install_macos_update', { url: downloadUrl })
+                .catch(function(e) {
+                  link.textContent = 'Failed';
+                  setTimeout(function() { link.textContent = 'Install'; link.disabled = false; }, 3000);
+                });
+              return false;
+            };
+          } else if (isTauri && isAndroid && window.AndroidBridge && window.AndroidBridge.installApk) {
+            // Android Tauri — download + install via bridge
+            link.textContent = 'Install';
+            window._apkProgress = function(pct, msg) {
+              var sizeEl = document.getElementById('appUpdateSize');
+              if (pct < 0) { link.textContent = 'Retry'; link.disabled = false; if (sizeEl) sizeEl.textContent = msg; return; }
+              if (pct >= 100) { link.textContent = 'Installing...'; }
+              else if (sizeEl) sizeEl.textContent = msg;
+            };
+            link.onclick = function() {
+              link.disabled = true;
+              link.textContent = 'Downloading...';
+              localStorage.setItem('app_installed_version', latest);
+              window.AndroidBridge.installApk(downloadUrl);
+              return false;
+            };
+          } else {
+            // Browser fallback — download link
+            link.onclick = function() {
+              localStorage.setItem('app_installed_version', latest);
+              downloadApp(file, link);
+              return false;
+            };
+          }
           banner.style.display = 'block';
         }
       }

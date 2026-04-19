@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegoodthings/nicegoodthings.github.io/main/tauri-v2-capability-schema.json",
+  "identifier": "default",
+  "description": "Default capability for remote URL access",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://musicseeker.hanaktech.org/*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-set-title"
+  ]
+}
