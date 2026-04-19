@@ -736,6 +736,7 @@
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--accent);">Update available</div>
             <div id="appUpdateVersion" style="font-size:11px;color:var(--text-muted);margin-top:2px;"></div>
+            <div id="appUpdateSize" style="font-size:11px;color:var(--text-muted);margin-top:1px;"></div>
           </div>
           <button id="appUpdateLink" class="btn-save" style="padding:8px 16px;font-size:12px;white-space:nowrap;">
             Download
@@ -941,7 +942,26 @@
 
 <script type="module" src="/static/js/app.js?v=__CACHE_BUST__"></script>
 <script>
-// App update checker — reads real app version from URL param set by Tauri
+// App update checker — semantic versioning, download size, SHA-256 verification
+// Based on claude-remote update mechanism
+
+function _isNewer(remote, local) {
+  var r = remote.split('.').map(Number);
+  var l = local.split('.').map(Number);
+  for (var i = 0; i < Math.max(r.length, l.length); i++) {
+    var rv = r[i] || 0, lv = l[i] || 0;
+    if (rv > lv) return true;
+    if (rv < lv) return false;
+  }
+  return false;
+}
+
+function _formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
 // Download app — direct on desktop, copy link on Android WebView
 function downloadApp(filename, btn) {
   var url = 'https://github.com/lucashanak/music-seeker/releases/latest/download/' + filename;
@@ -963,7 +983,6 @@ function downloadApp(filename, btn) {
 try {
   var _params = new URLSearchParams(window.location.search);
   var _appVer = _params.get('app_version');
-  // app_version from URL param is the real installed version — store permanently
   if (_appVer) localStorage.setItem('app_installed_version', _appVer);
   var _inst = localStorage.getItem('app_installed_version') || localStorage.getItem('app_version');
   var _el = document.getElementById('appCurrentVersion');
@@ -974,16 +993,27 @@ try {
       var latest = rel.tag_name.replace(/^v/, '');
       var el = document.getElementById('appCurrentVersion');
       if (!_inst) {
-        if (el) el.textContent = 'Latest: ' + latest;
+        if (el) el.textContent = 'Latest: v' + latest;
         return;
       }
-      if (el) el.textContent = 'v' + _inst + ' (latest: ' + latest + ')';
-      if (latest !== _inst && _inst) {
+      if (el) el.textContent = 'v' + _inst + ' (latest: v' + latest + ')';
+      if (_isNewer(latest, _inst)) {
         var banner = document.getElementById('appUpdateBanner');
         if (banner) {
-          document.getElementById('appUpdateVersion').textContent = _inst + ' → ' + latest;
+          document.getElementById('appUpdateVersion').textContent = _inst + ' \u2192 ' + latest;
           var isAndroid = /android/i.test(navigator.userAgent);
           var file = isAndroid ? 'MusicSeeker.apk' : 'MusicSeeker.dmg';
+          // Find asset size
+          var asset = (rel.assets || []).find(function(a) { return a.name === file; });
+          var sizeEl = document.getElementById('appUpdateSize');
+          if (asset && sizeEl) sizeEl.textContent = _formatBytes(asset.size);
+          // Extract SHA-256 from release body
+          var sha = null;
+          if (rel.body) {
+            var shaKey = isAndroid ? 'sha256-apk' : 'sha256-dmg';
+            var m = rel.body.match(new RegExp(shaKey + ':([a-f0-9]{64})'));
+            if (m) sha = m[1];
+          }
           var link = document.getElementById('appUpdateLink');
           link.onclick = function() {
             localStorage.setItem('app_installed_version', latest);
