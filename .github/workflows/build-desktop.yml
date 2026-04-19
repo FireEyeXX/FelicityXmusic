@@ -191,14 +191,13 @@ jobs:
               <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_provider_paths" /></provider>' "$MANIFEST"
 
           # FileProvider paths config
-          mkdir -p "$RES/../xml"
-          cat > "$RES/../xml/file_provider_paths.xml" << 'XMLEOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <paths>
-              <cache-path name="updates" path="updates/" />
-          </paths>
-          XMLEOF
-          sed -i 's/^          //' "$RES/../xml/file_provider_paths.xml"
+          mkdir -p "$RES/xml"
+          cat > "$RES/xml/file_provider_paths.xml" << 'XMLEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>
+XMLEOF
 
           # MainActivity
           MAIN_ACT=$(find "$GEN" -name "MainActivity.kt" | head -1)
