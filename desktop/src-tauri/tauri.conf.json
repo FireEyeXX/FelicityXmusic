@@ -19,14 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src * 'unsafe-inline' 'unsafe-eval' blob: data: media:;",
-      "dangerousRemoteDomainIpcAccess": [
-        {
-          "domain": "musicseeker.hanaktech.org",
-          "windows": ["main"],
-          "enableTauriAPI": true
-        }
-      ]
+      "csp": "default-src * 'unsafe-inline' 'unsafe-eval' blob: data: media:;"
     }
   },
   "bundle": {
