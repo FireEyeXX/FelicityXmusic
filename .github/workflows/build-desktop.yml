@@ -293,21 +293,25 @@ jobs:
                                           downloaded += n
                                           if (total > 0) {
                                               val pct = (downloaded * 100 / total).toInt()
-                                              evaluateJs("window._apkProgress && window._apkProgress($pct, 'Downloading: ${downloaded / 1024}/${total / 1024} KB')")
+                                              val dlKb = downloaded / 1024
+                                              val totKb = total / 1024
+                                              evaluateJs("window._apkProgress && window._apkProgress(\$pct, 'Downloading: \$dlKb/\$totKb KB')")
                                           }
                                       }
                                   }
                               }
                               conn.disconnect()
                               evaluateJs("window._apkProgress && window._apkProgress(100, 'Installing...')")
-                              val uri = FileProvider.getUriForFile(this@MainActivity, "${'$'}{packageName}.fileprovider", apkFile)
+                              val pkgName = packageName
+                              val uri = FileProvider.getUriForFile(this@MainActivity, "\$pkgName.fileprovider", apkFile)
                               val intent = Intent(Intent.ACTION_VIEW).apply {
                                   setDataAndType(uri, "application/vnd.android.package-archive")
                                   flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
                               }
                               startActivity(intent)
                           } catch (e: Exception) {
-                              evaluateJs("window._apkProgress && window._apkProgress(-1, 'Failed: ${e.message}')")
+                              val msg = e.message ?: "Unknown error"
+                              evaluateJs("window._apkProgress && window._apkProgress(-1, 'Failed: \$msg')")
                           }
                       }.start()
                   }
