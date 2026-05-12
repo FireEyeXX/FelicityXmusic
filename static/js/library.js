@@ -5,12 +5,17 @@ import { $, $$, esc, showToast, historyBack, showPlaylistPicker } from './utils.
 import { apiJson } from './api.js';
 import { renderResults } from './search.js';
 import { fetchPlaylistBpm, addBpmBadges, createBpmFilter, addScanButton } from './bpm.js';
-import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { attachContextMenu, buildActionsFor, showContextMenu, wasLongPress } from './contextmenu.js';
 
 let libraryCache = null;
 let currentLibPlaylistId = null;
 let currentLibPlaylistName = '';
 let currentLibPlaylistTracks = [];
+
+// ── Multi-select state for playlist detail tracks ──
+// Separate from the bulk-checkbox mode; lives only while detail view is open.
+let _selectSet = new Set(); // indices of selected cards
+let _lastSelectIdx = -1;    // last single-clicked index for shift-range
 
 // ── Load Playlists ──
 export async function loadLibrary() {
@@ -140,7 +145,14 @@ async function loadLibraryDetail(id) {
     }
     $('#libDetailCount').textContent = `${currentLibPlaylistTracks.length} tracks`;
     renderResults(currentLibPlaylistTracks, '#libraryTracks');
+    // Tracks from a Navidrome playlist are definitively in the library —
+    // mark them so openModal shows the Delete button without waiting for checkLibrary.
+    _markTracksInLibrary('#libraryTracks', currentLibPlaylistTracks);
+    // Override context menu: inject libraryPlaylistId/Name so right-click offers
+    // "Remove from playlist" and "Delete from library" actions.
+    _attachLibraryTrackContextMenu(id, currentLibPlaylistName);
     _addBulkCheckboxes();
+    _addSelectListeners();
     _addRemoveButtons(id);
     // BPM: filter bar with scan button, fetch cached BPM, add badges
     _initBpmFilter(id);
@@ -152,7 +164,239 @@ async function loadLibraryDetail(id) {
   }
 }
 
-// ── Bulk select ──
+// ── Fix #1: mark Navidrome playlist tracks as inLibrary so openModal shows Delete ──
+function _markTracksInLibrary(containerSelector, tracks) {
+  $$(`${containerSelector} .card`).forEach((card, i) => {
+    try {
+      const item = JSON.parse(card.dataset.item);
+      item.inLibrary = true;
+      card.dataset.item = JSON.stringify(item);
+      // Add visual badge if not already present
+      if (!card.querySelector('.in-library-badge')) {
+        card.classList.add('in-library');
+        const badge = document.createElement('div');
+        badge.className = 'in-library-badge';
+        badge.textContent = 'In Library';
+        card.appendChild(badge);
+      }
+    } catch {}
+  });
+}
+
+// ── Fix #2: override context menu on libraryTracks with playlist context ──
+// Re-attaches with augmented getItem that adds "Remove from playlist" and
+// "Delete from library" actions. Resets __ctxAttached so attachContextMenu
+// replaces the previous handler from renderResults.
+function _attachLibraryTrackContextMenu(playlistId, playlistName) {
+  const el = $('#libraryTracks');
+  if (!el) return;
+  // Reset guard so attachContextMenu re-registers listeners for this container
+  el.__ctxAttached = false;
+  attachContextMenu(el, {
+    selector: '.card[data-item]',
+    getItem: (targetEl) => {
+      try {
+        const item = JSON.parse(targetEl.dataset.item);
+        const idx = Array.from($$('#libraryTracks .card')).indexOf(targetEl);
+        // If this card is part of a multi-selection, build a multi-track menu
+        if (_selectSet.size > 1 && _selectSet.has(idx)) {
+          return _buildMultiSelectMenu(playlistId, playlistName);
+        }
+        const type = item.type || 'track';
+        const base = buildActionsFor(item, type, { inLibrary: true });
+        // Inject "Remove from this playlist" before Delete at the end
+        const removeAction = {
+          label: `Remove from "${playlistName}"`, icon: '&times;', danger: false,
+          onClick: () => _removeTrackFromPlaylist(playlistId, item, idx),
+        };
+        const deleteAction = {
+          label: 'Delete from library', icon: '&#128465;', danger: true,
+          onClick: () => _deleteTrackFromLibrary(item),
+        };
+        return {
+          item,
+          type,
+          actions: [...base, { divider: true }, removeAction, deleteAction],
+        };
+      } catch { return null; }
+    },
+  });
+}
+
+async function _removeTrackFromPlaylist(playlistId, item, idx) {
+  try {
+    await apiJson(`/api/library/playlist/${playlistId}/remove-by-name`, {
+      method: 'POST',
+      body: { name: item.name || '', artist: item.artist || '' },
+    });
+    showToast('Removed from playlist');
+    loadLibraryDetail(playlistId);
+  } catch (e) {
+    showToast('Failed: ' + (e.message || ''));
+  }
+}
+
+async function _deleteTrackFromLibrary(item) {
+  try {
+    const check = await apiJson('/api/library/track/check-playlists', {
+      method: 'POST',
+      body: { name: item.name || '', artist: item.artist || '' },
+    });
+    let msg = `Delete "${item.artist} - ${item.name}" from library?`;
+    if (check.in_playlists && check.in_playlists.length) {
+      msg += `\n\nThis track is in ${check.in_playlists.length} playlist(s):\n` +
+        check.in_playlists.map(p => `• ${p.name}`).join('\n');
+    }
+    if (!confirm(msg)) return;
+    await apiJson('/api/library/track/delete', {
+      method: 'POST',
+      body: { name: item.name || '', artist: item.artist || '' },
+    });
+    showToast('Track deleted');
+    if (currentLibPlaylistId) loadLibraryDetail(currentLibPlaylistId);
+  } catch (e) {
+    showToast(e.message || 'Failed to delete');
+  }
+}
+
+// ── Fix #3: Multi-select (shift/cmd-click) on playlist detail tracks ──
+function _addSelectListeners() {
+  _selectSet.clear();
+  _lastSelectIdx = -1;
+  $$('#libraryTracks .card').forEach((card, i) => {
+    // Use capture=true so this fires BEFORE the card's bubble-phase click
+    // handler (added by renderResults) — modifier clicks are intercepted here
+    // and stopImmediatePropagation prevents the modal from opening.
+    card.addEventListener('click', (e) => {
+      if (e.shiftKey || e.metaKey || e.ctrlKey) {
+        // Modifier click → select only, never open modal
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (e.shiftKey && _lastSelectIdx >= 0) {
+          // Range select
+          const lo = Math.min(_lastSelectIdx, i);
+          const hi = Math.max(_lastSelectIdx, i);
+          for (let j = lo; j <= hi; j++) _selectSet.add(j);
+        } else {
+          // Cmd/Ctrl toggle
+          if (_selectSet.has(i)) _selectSet.delete(i); else _selectSet.add(i);
+          _lastSelectIdx = i;
+        }
+        _updateSelectUI();
+      } else {
+        // Plain click: clear selection, let normal handler proceed
+        if (_selectSet.size > 0) {
+          _selectSet.clear();
+          _updateSelectUI();
+        }
+        _lastSelectIdx = i;
+      }
+    }, true); // capture phase
+  });
+}
+
+function _updateSelectUI() {
+  $$('#libraryTracks .card').forEach((card, i) => {
+    if (_selectSet.has(i)) {
+      card.dataset.selected = 'true';
+    } else {
+      delete card.dataset.selected;
+    }
+  });
+}
+
+function _buildMultiSelectMenu(playlistId, playlistName) {
+  const cards = $$('#libraryTracks .card');
+  const selectedItems = [..._selectSet]
+    .filter(i => cards[i])
+    .map(i => { try { return JSON.parse(cards[i].dataset.item); } catch { return null; } })
+    .filter(Boolean);
+  if (!selectedItems.length) return null;
+  const count = selectedItems.length;
+  return {
+    title: `${count} tracks selected`,
+    actions: [
+      {
+        label: 'Play all', icon: '&#9654;',
+        onClick: () => import('./upnext.js').then(m => m.playTracks(selectedItems)),
+      },
+      {
+        label: 'Play next', icon: '&#8595;',
+        onClick: () => {
+          const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
+          store.playerQueue.splice(idx, 0, ...selectedItems);
+          import('./queue.js').then(m => m.renderQueue());
+          import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+          showToast(`${count} tracks will play next`);
+        },
+      },
+      {
+        label: 'Add to playlist', icon: '+',
+        onClick: () => {
+          import('./player.js').then(m => {
+            m.addToQueue(selectedItems);
+            showToast(`Added ${count} to playlist`);
+          });
+        },
+      },
+      {
+        label: 'Add to other playlist…', icon: '&#9776;',
+        onClick: async () => {
+          try {
+            const data = await apiJson('/api/library/playlists');
+            const others = (data.playlists || []).filter(p => p.id !== playlistId);
+            if (!others.length) { showToast('No other playlists'); return; }
+            const picked = await showPlaylistPicker(others);
+            if (!picked || !picked.length) return;
+            for (const pl of picked) {
+              await apiJson(`/api/library/playlist/${pl.id}/add-and-download-batch`, {
+                method: 'POST',
+                body: { tracks: selectedItems.map(t => ({ name: t.name, artist: t.artist || '', album: t.album || '' })) },
+              });
+            }
+            showToast(`Added ${count} tracks to ${picked.map(p => p.name).join(', ')}`);
+          } catch (e) { showToast(e.message || 'Failed'); }
+        },
+      },
+      { divider: true },
+      {
+        label: `Remove ${count} from "${playlistName}"`, icon: '&times;',
+        onClick: async () => {
+          if (!confirm(`Remove ${count} tracks from "${playlistName}"?`)) return;
+          try {
+            // Sort descending to avoid index shift
+            const indices = [..._selectSet].sort((a, b) => b - a);
+            await apiJson(`/api/library/playlist/${playlistId}/tracks`, {
+              method: 'DELETE', body: { indices },
+            });
+            showToast(`Removed ${count} tracks`);
+            loadLibraryDetail(playlistId);
+          } catch (e) { showToast(e.message || 'Failed'); }
+        },
+      },
+      {
+        label: `Delete ${count} from library`, icon: '&#128465;', danger: true,
+        onClick: async () => {
+          if (!confirm(`Delete ${count} tracks from library? This cannot be undone.`)) return;
+          let deleted = 0;
+          for (const item of selectedItems) {
+            try {
+              await apiJson('/api/library/track/delete', {
+                method: 'POST',
+                body: { name: item.name || '', artist: item.artist || '' },
+              });
+              deleted++;
+            } catch {}
+          }
+          showToast(`Deleted ${deleted} of ${count} tracks`);
+          if (currentLibPlaylistId) loadLibraryDetail(currentLibPlaylistId);
+        },
+      },
+    ],
+  };
+}
+
+// ── Bulk select (existing checkbox mode — unchanged) ──
 let _bulkSelected = new Set();
 
 function _addBulkCheckboxes() {
@@ -205,7 +449,7 @@ function _addRemoveButtons(playlistId) {
           b.replaceWith(b); // will lose handler, so just reload
         });
         // Simpler: reload the whole detail
-        openLibraryDetail(playlistId);
+        loadLibraryDetail(playlistId);
       } catch (err) { showToast('Failed: ' + (err.message || '')); }
     });
     card.style.position = 'relative';
