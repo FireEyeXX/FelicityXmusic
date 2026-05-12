@@ -5,8 +5,8 @@
 import { chromium } from 'playwright';
 
 const BASE = 'http://192.168.1.22:8090';
-const USER = 'lucas';
-const PASS = 'Poiwer3122.';
+const USER = 'claude_test';
+const PASS = 'TestPass2026!';
 const PLAYLIST_NAME = 'MyZouk';
 
 async function login(page) {

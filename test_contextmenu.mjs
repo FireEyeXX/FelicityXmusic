@@ -3,8 +3,8 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 
 const BASE = 'http://192.168.1.22:8090';
-const USER = 'lucas';
-const PASS = 'Poiwer3122.';
+const USER = 'claude_test';
+const PASS = 'TestPass2026!';
 const SHOTS = '/tmp/ctx-shots';
 fs.mkdirSync(SHOTS, { recursive: true });
 
@@ -75,7 +75,7 @@ async function closeCtxMenu(page) {
     if (await ctxMenuVisible(page)) {
       const labels = await ctxMenuLabels(page);
       ok(`Context menu visible with ${labels.length} actions: ${labels.join(', ')}`);
-      const needed = ['Play', 'Add to queue', 'Download'];
+      const needed = ['Play', 'Add to playlist', 'Download'];
       for (const n of needed) {
         if (labels.some(l => l.includes(n))) ok(`Has "${n}"`);
         else bad(`Missing "${n}"`);
@@ -86,11 +86,11 @@ async function closeCtxMenu(page) {
     await page.screenshot({ path: `${SHOTS}/01-track-ctx.png` });
     await closeCtxMenu(page);
 
-    log('▶ Click "Add to queue" via context menu');
+    log('▶ Click "Add to playlist" via context menu');
     await rightClickFirstCard(page);
     await page.waitForTimeout(200);
-    // Find "Add to queue" button
-    const addBtn = await page.$('.ctx-menu .ctx-menu-item:has-text("Add to queue")');
+    // Find "Add to playlist" button
+    const addBtn = await page.$('.ctx-menu .ctx-menu-item:has-text("Add to playlist")');
     if (addBtn) {
       await addBtn.click();
       await page.waitForTimeout(800);
@@ -105,10 +105,10 @@ async function closeCtxMenu(page) {
       await page.waitForTimeout(400);
       const qItems = await page.$$('#queueList .queue-item, #fpQueuePanelList .queue-item');
       if (qItems.length > 0) ok(`Queue has ${qItems.length} item(s) after add`);
-      else bad('Queue still empty after "Add to queue"');
+      else bad('Queue still empty after "Add to playlist"');
       await page.screenshot({ path: `${SHOTS}/02-queue-added.png` });
     } else {
-      bad('Could not find "Add to queue" button in menu');
+      bad('Could not find "Add to playlist" button in menu');
     }
 
     log('▶ Right-click on queue item');
@@ -126,10 +126,10 @@ async function closeCtxMenu(page) {
       if (await ctxMenuVisible(page)) {
         const labels = await ctxMenuLabels(page);
         ok(`Queue context menu: ${labels.join(', ')}`);
-        if (labels.some(l => l.includes('Remove from queue'))) ok('Has "Remove from queue"');
-        else bad('Missing "Remove from queue"');
-        if (labels.some(l => l.includes('Add to playlist'))) ok('Has "Add to playlist"');
-        else bad('Missing "Add to playlist"');
+        if (labels.some(l => l.includes('Remove from playlist'))) ok('Has "Remove from playlist"');
+        else bad('Missing "Remove from playlist"');
+        if (labels.some(l => l.includes('Add to other playlist'))) ok('Has "Add to other playlist"');
+        else bad('Missing "Add to other playlist"');
       } else {
         bad('Queue context menu did not appear');
       }
