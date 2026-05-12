@@ -227,7 +227,7 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => import('./recommendations.js').then(m => m.playRecIndex && m.playRecIndex(context.recIndex)),
     });
     actions.push({
-      label: 'Add to queue', icon: '+',
+      label: 'Add to playlist', icon: '+',
       onClick: () => _addToQueue([it]),
     });
     actions.push({
@@ -245,7 +245,7 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => _playNext(it),
     });
     actions.push({
-      label: 'Add to queue', icon: '+',
+      label: 'Add to playlist', icon: '+',
       onClick: () => _addToQueue([it]),
     });
     actions.push({ divider: true });
@@ -259,7 +259,7 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => _playAlbumReplace(it),
     });
     actions.push({
-      label: 'Add all to queue', icon: '+',
+      label: 'Add all to playlist', icon: '+',
       onClick: () => _addAlbumToQueue(it),
     });
     actions.push({ divider: true });
@@ -296,7 +296,7 @@ export function buildActionsFor(item, type, context = {}) {
   // ── Add to Navidrome playlist (track-like) ──
   if (isTracklike) {
     actions.push({
-      label: 'Add to playlist…', icon: '&#9776;',
+      label: 'Add to other playlist…', icon: '&#9776;',
       onClick: () => _addToNavidromePlaylist(it),
     });
   }
@@ -343,7 +343,7 @@ export function buildActionsFor(item, type, context = {}) {
   if (type === 'queue-track' && typeof context.queueIndex === 'number') {
     actions.push({ divider: true });
     actions.push({
-      label: 'Remove from queue', icon: '&times;', danger: true,
+      label: 'Remove from playlist', icon: '&times;', danger: true,
       onClick: () => _removeFromQueue(context.queueIndex),
     });
   }
@@ -362,7 +362,7 @@ export function buildActionsFor(item, type, context = {}) {
 function _addToQueue(items) {
   import('./player.js').then(m => {
     m.addToQueue(items);
-    showToast(`Added ${items.length} to queue`);
+    showToast(`Added ${items.length} to playlist`);
   });
 }
 

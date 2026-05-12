@@ -358,7 +358,7 @@ export function addToQueue(items, playNow = false) {
   }
   renderQueue();
   saveQueueDebounced();
-  showToast(`Added ${items.length} track${items.length > 1 ? 's' : ''} to queue`);
+  showToast(`Added ${items.length} track${items.length > 1 ? 's' : ''} to playlist`);
   // Playlist mode: add tracks to Navidrome playlist (one batch call)
   if (store.playlistMode) {
     apiJson(`/api/library/playlist/${store.playlistMode.id}/add-and-download-batch`, {
