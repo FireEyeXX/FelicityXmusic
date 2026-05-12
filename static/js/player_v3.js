@@ -7,8 +7,9 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
 import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
+import { getDjData } from './bpm.js';
 
 // ── Dual-deck Web Audio API crossfade engine with DJ mixing ──
 
@@ -31,6 +32,11 @@ let _beatSync = null;
 // DJ data for current and next track (fetched asynchronously)
 let _outDjData = null;
 let _inDjData = null;
+
+// Track expected src per deck — only handle errors from the current source
+let _expectedSrcA = '';
+let _expectedSrcB = '';
+let _crossfadeTriggered = false;
 
 // DJ settings from localStorage (read fresh each call)
 function _djSetting(key, def) { return localStorage.getItem(`ms_dj_${key}`) || def; }
@@ -66,6 +72,16 @@ function _ensureAudioContext() {
   _nodesB.gain.gain.value = 0;
 }
 
+function _setDeckSrc(deck, src) {
+  if (deck === _deckA) _expectedSrcA = src;
+  else _expectedSrcB = src;
+  deck.src = src;
+  deck.load();
+}
+function _isExpectedSrc(deck) {
+  const expected = deck === _deckA ? _expectedSrcA : _expectedSrcB;
+  return expected && deck.src && deck.src === expected;
+}
 function _activeDeckEl() { return _activeDeck === 'A' ? _deckA : _deckB; }
 function _inactiveDeckEl() { return _activeDeck === 'A' ? _deckB : _deckA; }
 function _activeNodes() { return _activeDeck === 'A' ? _nodesA : _nodesB; }
@@ -110,6 +126,13 @@ function _startCrossfade(seekable = true) {
   _activeDeck = _activeDeck === 'A' ? 'B' : 'A';
   _crossfading = true;
 
+  // Save DJ data refs for transition BEFORE swapping
+  const transOutData = _outDjData;
+  const transInData = _inDjData;
+  // Swap DJ data so timeupdate uses new track's data for the NEXT crossfade
+  _outDjData = _inDjData;
+  _inDjData = null;
+
   // Read DJ settings
   const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
   const tr = _djSetting('tempo_range', '8');
@@ -121,7 +144,7 @@ function _startCrossfade(seekable = true) {
   const inSeekable = seekable;
 
   // Use DJ mix engine for beat-synced, key-aware transition
-  const result = scheduleDjTransitionV3(_ctx, outDesc, inDesc, _outDjData, _inDjData, {
+  const result = scheduleDjTransitionV3(_ctx, outDesc, inDesc, transOutData, transInData, {
     numBeats, tempoRange, transitionStyle: transStyle,
     introSkip: inSeekable ? introSkip : '0',  // no seek on non-cached streams
     seekable: inSeekable,
@@ -138,10 +161,10 @@ function _startCrossfade(seekable = true) {
 
   // Start real-time beat drift correction during the crossfade overlap
   if (_beatSync) _beatSync.stop();
-  if (_outDjData?.bpm && _inDjData?.bpm) {
+  if (transOutData?.bpm && transInData?.bpm) {
     _beatSync = new CrossfadeBeatSync(
       _fadingOutDeck, _activeDeckEl(),
-      _outDjData.bpm, _inDjData.bpm, result.outRate, result.inRate
+      transOutData.bpm, transInData.bpm, result.outRate, result.inRate
     );
     _beatSync.start();
   }
@@ -165,8 +188,6 @@ function _startCrossfade(seekable = true) {
     prefetchCleanup(store.playerQueue, store.playerIndex);
     _fadingOutDeck = null;
     _crossfading = false;
-    _outDjData = _inDjData;
-    _inDjData = null;
     resumePrefetch();
     // Gradually return new deck playbackRate to 1.0 over ~10 seconds
     clearInterval(_rateReturnTimer); // Bug #4: clear previous
@@ -195,17 +216,36 @@ function _startCrossfade(seekable = true) {
 }
 
 /** Pre-analyze upcoming tracks, predict Smart Queue pick, prefetch it.
- *  1. Analyze next N tracks for BPM/key data
- *  2. Predict which track Smart Queue would pick
- *  3. Prefetch that track's audio for smooth crossfade */
+ *  1. Ensure current track DJ data is loaded (needed for smart queue + crossfade)
+ *  2. Fetch next track DJ data immediately (needed for crossfade timing)
+ *  3. Predict Smart Queue pick and prefetch it
+ *  4. Analyze remaining tracks in background */
 async function _preAnalyzeUpcoming() {
   const PRE_ANALYZE = parseInt(_djSetting('pre_analyze', '10')) || 10;
-  const { getDjData } = await import('./bpm.js');
-
-  // Step 1: Analyze tracks — forward first, then backward if Smart Queue
   const smartMode = _djSetting('smart_queue', 'off');
-  // Forward: next N tracks
-  for (let i = 1; i <= PRE_ANALYZE; i++) {
+
+  // Step 1: Ensure _outDjData is loaded (block until ready — needed for everything)
+  if (!_outDjData) {
+    const cur = store.playerQueue[store.playerIndex];
+    if (cur) {
+      const d = await fetchDjData(_decodeEntities(cur.name || ''), _decodeEntities(cur.artist || '')).catch(() => null);
+      if (d) _outDjData = d;
+    }
+  }
+
+  // Step 2: Immediately fetch DJ data for sequential next track (crossfade fallback)
+  const seqNext = store.playerQueue[store.playerIndex + 1];
+  if (seqNext) {
+    const name = _decodeEntities(seqNext.name || '');
+    const artist = _decodeEntities(seqNext.artist || '');
+    if (!getDjData(name, artist)) await fetchDjData(name, artist).catch(() => null);
+    // Set _inDjData early so crossfade has data even if smart queue changes it later
+    if (!_inDjData) _inDjData = getDjData(name, artist);
+    prefetchTrack(name, artist);
+  }
+
+  // Step 3: Analyze remaining forward tracks for Smart Queue candidate pool
+  for (let i = 2; i <= PRE_ANALYZE; i++) {
     const idx = store.playerIndex + i;
     if (idx >= store.playerQueue.length) break;
     const item = store.playerQueue[idx];
@@ -225,7 +265,7 @@ async function _preAnalyzeUpcoming() {
     }
   }
 
-  // Step 2: Predict Smart Queue pick and set _inDjData
+  // Step 4: Predict Smart Queue pick and update _inDjData + prefetch
   if (smartMode !== 'off' && !store.shuffleEnabled && _outDjData) {
     const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
     if (smartIdx != null) {
@@ -233,20 +273,8 @@ async function _preAnalyzeUpcoming() {
       const name = _decodeEntities(item.name || '');
       const artist = _decodeEntities(item.artist || '');
       _inDjData = getDjData(name, artist);
-      // Step 3: Prefetch Smart Queue pick (priority) + sequential fallback
       prefetchTrack(name, artist);
-      // Also prefetch sequential next as fallback
-      const seqNext = store.playerQueue[store.playerIndex + 1];
-      if (seqNext) prefetchTrack(_decodeEntities(seqNext.name || ''), _decodeEntities(seqNext.artist || ''));
-      return;
     }
-  }
-
-  // Fallback: sequential next track
-  const nextItem = store.playerQueue[store.playerIndex + 1];
-  if (nextItem) {
-    _inDjData = getDjData(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || ''));
-    prefetchTrack(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || ''));
   }
 }
 
@@ -271,8 +299,9 @@ function _waitForBuffer(deck) {
       if (deck.buffered.length > 0) {
         const bufferedEnd = deck.buffered.end(deck.buffered.length - 1);
         const aheadSec = bufferedEnd - deck.currentTime;
-        if (aheadSec >= 30 || bufferedEnd >= (deck.duration || Infinity) * 0.9) {
-          resolve(); return; // 30s buffered ahead or 90%+ of track
+        const trackDur = deck.duration || 0;
+        if (aheadSec >= 15 || (trackDur > 0 && bufferedEnd >= trackDur * 0.8)) {
+          resolve(); return; // 15s buffered ahead or 80%+ of track
         }
       }
       setTimeout(check, 500);
@@ -348,10 +377,11 @@ export function addToQueue(items, playNow = false) {
 }
 
 // ── Load and Play Current Track ──
-export function loadAndPlay() {
+export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
-  // Pause prefetch immediately — current track gets all bandwidth
-  pausePrefetch();
+  // Abort prefetch downloads — current track gets all bandwidth
+  abortPrefetch();
+  _crossfadeTriggered = false;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
   const item = store.playerQueue[store.playerIndex];
@@ -382,13 +412,14 @@ export function loadAndPlay() {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    let cached = getCachedUrl(cleanName, cleanArtist);
-    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
-    const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
 
     const currentDeck = _activeDeckEl();
     if (!currentDeck.paused && currentDeck.src) {
-      // Crossfade: full DJ (with cached blob) or simple gain fade (uncached stream)
+      // Crossfade: use cache if ready, brief wait if almost done, else stream
+      let cached = getCachedUrl(cleanName, cleanArtist);
+      if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 2000); if (w) cached = w; }
+      const src = cached || streamUrl;
       pausePrefetch();
       if (!_inDjData) {
         fetchDjData(cleanName, cleanArtist).then(d => { _inDjData = d; }).catch(() => {});
@@ -399,19 +430,17 @@ export function loadAndPlay() {
       // If we set src first, the rapid-skip handler would clear it, causing silence.
       _startCrossfade(!!cached); // pass seekable flag — also swaps _activeDeck
       const nextDeck = _activeDeckEl(); // after swap, the NEW active deck is the one to load
-      nextDeck.src = src;
-      nextDeck.load();
+      _setDeckSrc(nextDeck, src);
       nextDeck.play().catch(() => {});
     } else {
-      // Cold start — nothing currently playing
+      // Cold start — play immediately, no cache wait
       if (_crossfading && _fadingOutDeck) {
         resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
         _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
         clearTimeout(_crossfadeTimer); _crossfading = false;
       }
       const deck = currentDeck;
-      deck.src = src;
-      deck.load();
+      _setDeckSrc(deck, getCachedUrl(cleanName, cleanArtist) || streamUrl);
       deck.play().catch(() => {});
       if (_activeGain()) {
         _activeGain().gain.cancelScheduledValues(0);
@@ -477,13 +506,16 @@ function updateDownloadButtons(item) {
 
 export function updatePlaylistBadge() {
   const badge = $('#fpPlaylistBadge');
-  if (!badge) return;
-  if (store.playlistMode) {
-    badge.textContent = store.playlistMode.name;
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
+  if (badge) {
+    if (store.playlistMode) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
+    else badge.style.display = 'none';
   }
+  // Show/hide remove-from-playlist buttons
+  const show = store.playlistMode ? '' : 'none';
+  const rm1 = $('#playerRemoveFromPlaylist');
+  const rm2 = $('#fpRemoveFromPlaylist');
+  if (rm1) rm1.style.display = show;
+  if (rm2) rm2.style.display = show;
 }
 
 export function showPlayerBar() {
@@ -547,11 +579,30 @@ async function _autoCastAndPlay(item, cleanName, cleanArtist) {
 
 // ── Next / Prev ──
 let _lastNextTime = 0;
-export function nextTrack() {
-  // Throttle: ignore if called again within 2s (prevents chain-skip)
+export function nextTrack(opts = {}) {
+  // Throttle: ignore if called again within 500ms (prevents chain-skip)
   const now = Date.now();
-  if (now - _lastNextTime < 2000) return;
+  if (now - _lastNextTime < 500) return;
   _lastNextTime = now;
+
+  // ── Record skip/accept for recommendation feedback (only on user-initiated skips) ──
+  const reason = opts.reason || 'user';
+  if (reason === 'user' || reason === 'ended') {
+    try {
+      const cur = store.playerQueue[store.playerIndex];
+      if (cur && cur.name) {
+        const deck = _activeDeckEl();
+        const dur = deck && deck.duration ? deck.duration : 0;
+        const pos = deck && deck.currentTime ? deck.currentTime : 0;
+        const ratio = dur > 0 ? pos / dur : 0;
+        import('./recommendations.js').then(m => {
+          if (reason === 'ended') m.recordAccept(cur);
+          else if (dur > 0 && ratio < 0.5 && pos < 30) m.recordSkip(cur);
+          else if (ratio > 0.7) m.recordAccept(cur);
+        });
+      }
+    } catch {}
+  }
 
   if (store.castDevice) {
     _castTransitioning = true;
@@ -579,6 +630,13 @@ function _nextTrackInQueue() {
   } else if (store.playerIndex < store.playerQueue.length - 1) {
     // Smart Queue: pick best next track by BPM/key instead of sequential
     const smartMode = _djSetting('smart_queue', 'off');
+    // Try cache if _outDjData wasn't set yet (async fetch didn't complete)
+    if (smartMode !== 'off' && !_outDjData) {
+      const cur = store.playerQueue[store.playerIndex];
+      if (cur) {
+        _outDjData = getDjData(_decodeEntities(cur.name || ''), _decodeEntities(cur.artist || ''));
+      }
+    }
     if (smartMode !== 'off' && _outDjData) {
       const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       if (smartIdx != null) {
@@ -636,7 +694,7 @@ function _nextTrackInQueue() {
 
 // ── Play a track from recommendations (virtual, not in queue) ──
 let _currentRecItem = null;
-export function playRecTrack(item) {
+export async function playRecTrack(item) {
   _currentRecItem = item;
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -664,16 +722,15 @@ export function playRecTrack(item) {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    let cached = getCachedUrl(cleanName, cleanArtist);
-    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
-    const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const cached = getCachedUrl(cleanName, cleanArtist);
+    const src = cached || streamUrl;
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {
       pausePrefetch();
       _startCrossfade();
       const nextDeck = _activeDeckEl(); // after swap
-      nextDeck.src = src;
-      nextDeck.load();
+      _setDeckSrc(nextDeck, src);
       nextDeck.play().catch(() => {});
     } else {
       if (_crossfading && _fadingOutDeck) {
@@ -681,8 +738,7 @@ export function playRecTrack(item) {
         _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
         clearTimeout(_crossfadeTimer); _crossfading = false;
       }
-      curDeck.src = src;
-      curDeck.load();
+      _setDeckSrc(curDeck, src);
       curDeck.play().catch(() => {});
       if (_activeGain()) {
         _activeGain().gain.cancelScheduledValues(0);
@@ -815,7 +871,10 @@ export async function loadQueueState() {
         $('#playerArtist').textContent = item.artist || '';
         const deck = _activeDeckEl();
         const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: store.authToken });
-        deck.src = `/api/player/stream?${params}`;
+        const restoreSrc = `/api/player/stream?${params}`;
+        if (deck === _deckA) _expectedSrcA = restoreSrc;
+        else _expectedSrcB = restoreSrc;
+        deck.src = restoreSrc;
         deck.preload = 'none';
         if (data.position_seconds > 0) {
           deck.addEventListener('loadedmetadata', () => { deck.currentTime = data.position_seconds; }, { once: true });
@@ -899,16 +958,17 @@ export function init() {
   // Both decks need ended/error handlers
   [_deckA, _deckB].forEach(deck => {
     deck.addEventListener('ended', () => {
-      if (deck !== _activeDeckEl() || _crossfading || !deck.src) return;
+      if (deck !== _activeDeckEl() || _crossfading || _crossfadeTriggered || !deck.src) return;
       if (store.repeatMode === 'one') {
         deck.currentTime = 0;
         deck.play().catch(() => {});
       } else {
-        nextTrack();
+        nextTrack({ reason: 'ended' });
       }
     });
     deck.addEventListener('error', () => {
-      if (deck !== _activeDeckEl() || !deck.src) return; // ignore error from cleared src
+      if (!_isExpectedSrc(deck)) return; // ignore deferred errors from previous sources
+      if (deck !== _activeDeckEl() && !_crossfading) return;
       if (_crossfading) {
         // Error on incoming deck during crossfade — abort crossfade, skip track
         if (_fadingOutDeck) {
@@ -922,11 +982,10 @@ export function init() {
         _crossfading = false;
       }
       showToast('Stream error, skipping...');
-      setTimeout(() => nextTrack(), 1000);
+      setTimeout(() => nextTrack({ reason: 'error' }), 1000);
     });
   });
 
-  let _crossfadeTriggered = false;
   // Timeupdate on both decks, but only UI-update from active deck
   [_deckA, _deckB].forEach(deck => {
     deck.addEventListener('timeupdate', () => {
@@ -974,15 +1033,12 @@ export function init() {
         _ab().onProgress(Math.floor(deck.currentTime * 1000), Math.floor(dur * 1000));
       }
       // ── Auto-crossfade: trigger nextTrack when approaching end ──
-      // Wait for DJ data before calculating trigger (avoids premature 5s fallback)
-      if (!_outDjData && deck.currentTime < dur - _crossfadeDur() - 5) {
-        // DJ data not loaded yet and we're far from end — skip check this tick
-      } else {
+      {
         // Outro skip: use detected outro_start or manual setting as effective end
         let effectiveEnd = dur;
         const outroSkip = _djSetting('outro_skip', 'auto');
         if (outroSkip === 'auto' && _outDjData && _outDjData.outro_start
-            && _outDjData.outro_start > dur * 0.5) { // ignore outro in first half
+            && _outDjData.outro_start > dur * 0.75) { // ignore outro before last 25%
           effectiveEnd = _outDjData.outro_start;
         } else if (outroSkip !== '0' && outroSkip !== 'auto') {
           effectiveEnd = dur - (parseInt(outroSkip) || 0);
@@ -995,7 +1051,8 @@ export function init() {
           const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
           const startBeat = findCrossfadeStartBeat(_outDjData.beat_grid, effectiveEnd, numBeats);
           triggerAt = effectiveEnd - startBeat;
-          if (triggerAt > dur * 0.5) triggerAt = _crossfadeDur();
+          // Clamp: never trigger earlier than 25% from end, max 30s
+          if (triggerAt > dur * 0.25 || triggerAt > 30) triggerAt = _crossfadeDur();
         }
         if (remaining <= triggerAt && remaining > -5 && !_crossfadeTriggered
             && store.repeatMode !== 'one' && !store.castDevice
@@ -1043,7 +1100,7 @@ export function init() {
       _deckB.volume = store.playerVolume;
     }
   });
-  function _seekFromEvent(bar, e) {
+  async function _seekFromEvent(bar, e) {
     const dur = _getDuration();
     if (!dur) return;
     const rect = bar.getBoundingClientRect();
@@ -1058,6 +1115,46 @@ export function init() {
   const miniBar = $('#playerProgressBar');
   miniBar.addEventListener('click', (e) => _seekFromEvent(miniBar, e));
   miniBar.addEventListener('touchstart', (e) => { e.preventDefault(); _seekFromEvent(miniBar, e); }, { passive: false });
+
+  // Add to playlist
+  async function _addToPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item) return;
+    try {
+      const data = await apiJson('/api/library/playlists');
+      const playlists = data.playlists || [];
+      if (!playlists.length) { showToast('No playlists. Create one in Library first.'); return; }
+      const { showPlaylistPicker } = await import('./utils.js');
+      const picked = await showPlaylistPicker(playlists, { multi: false });
+      if (!picked) return;
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${picked.id}/add-and-download`, {
+        method: 'POST',
+        body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
+      });
+      showToast(`Added to ${picked.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);
+  if ($('#fpAddToPlaylist')) $('#fpAddToPlaylist').addEventListener('click', _addToPlaylist);
+
+  // Remove from current playlist
+  async function _removeFromPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item || !store.playlistMode) return;
+    try {
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
+        method: 'POST',
+        body: { name: cleanName, artist: cleanArtist },
+      });
+      showToast(`Removed from ${store.playlistMode.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
+  if ($('#fpRemoveFromPlaylist')) $('#fpRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
 
   // Download current track
   $('#playerDownloadBtn').addEventListener('click', async () => {
@@ -1159,7 +1256,7 @@ export function init() {
   }
 
   // Cast state vars are module-level (see above init)
-  function _startCastPoll() {
+  async function _startCastPoll() {
     clearInterval(store.castPollTimer);
     _castLastState = '';
     store.castPollTimer = setInterval(async () => {

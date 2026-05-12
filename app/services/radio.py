@@ -139,57 +139,327 @@ async def _get_combined_radio(
     return deduped[:limit]
 
 
+def _norm_artist(a: str) -> str:
+    return (a or "").split(",")[0].split("&")[0].split(" feat")[0].split(" Feat")[0].split(" ft.")[0].strip().lower()
+
+
+_NAME_SUFFIX_RE = None  # lazy compile
+
+
+def _norm_name(n: str) -> str:
+    """Aggressive name normalization: strip remaster/live/feat/version suffixes,
+    parenthesized/bracketed clauses, and collapse whitespace/punctuation."""
+    global _NAME_SUFFIX_RE
+    import re
+    if _NAME_SUFFIX_RE is None:
+        _NAME_SUFFIX_RE = re.compile(
+            r"\s*[\(\[][^\)\]]*(remaster(ed)?|live|version|edit|mix|mono|stereo|deluxe|remix|acoustic|demo|bonus|feat\.?|with\s+|featuring)[^\)\]]*[\)\]]"
+            r"|\s*-\s*(remaster(ed)?|live|version|edit|mix|mono|stereo|deluxe|remix|acoustic|demo|bonus).*$",
+            re.IGNORECASE,
+        )
+    s = (n or "").strip()
+    # Strip suffixes iteratively (handles "Song (Live) (Remastered 2009)")
+    prev = None
+    while prev != s:
+        prev = s
+        s = _NAME_SUFFIX_RE.sub("", s).strip()
+    # Collapse non-alphanumeric to single space, lower
+    s = re.sub(r"[^\w\s]+", " ", s).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _norm_key(t: dict) -> tuple[str, str]:
+    return (_norm_name(t.get("name") or ""), _norm_artist(t.get("artist") or ""))
+
+
+def _hash_playlist(tracks: list[dict]) -> str:
+    import hashlib
+    h = hashlib.md5()
+    for t in tracks:
+        n, a = _norm_key(t)
+        h.update(f"{n}|{a}\n".encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
+
+# Profile cache: playlist_hash -> (timestamp, profile)
+_profile_cache: dict[str, tuple[float, dict]] = {}
+_profile_locks: dict[str, asyncio.Lock] = {}
+_PROFILE_TTL = 600
+_PROFILE_CACHE_MAX = 64
+# Global semaphore to bound Last.fm concurrency (5 req/s soft limit)
+_lastfm_sem = asyncio.Semaphore(5)
+
+
+def _prune_profile_cache(now: float) -> None:
+    if len(_profile_cache) <= _PROFILE_CACHE_MAX:
+        # cheap TTL prune
+        stale = [k for k, (ts, _) in _profile_cache.items() if now - ts >= _PROFILE_TTL]
+        for k in stale:
+            _profile_cache.pop(k, None)
+            _profile_locks.pop(k, None)
+        return
+    # Over cap: drop oldest half
+    items = sorted(_profile_cache.items(), key=lambda kv: kv[1][0])
+    for k, _ in items[: len(items) // 2]:
+        _profile_cache.pop(k, None)
+        _profile_locks.pop(k, None)
+
+
+async def _build_profile(tracks: list[dict]) -> dict:
+    """Aggregate playlist into artist weights + tag centroid via Last.fm.
+    Single-flight via per-key lock to avoid duplicate concurrent Last.fm work."""
+    import time as _t
+    key = _hash_playlist(tracks)
+    now = _t.time()
+    cached = _profile_cache.get(key)
+    if cached and now - cached[0] < _PROFILE_TTL:
+        return cached[1]
+    lock = _profile_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        # Re-check after acquiring lock (another coroutine may have populated it)
+        cached = _profile_cache.get(key)
+        if cached and now - cached[0] < _PROFILE_TTL:
+            return cached[1]
+        return await _build_profile_uncached(tracks, key, now)
+
+
+async def _build_profile_uncached(tracks: list[dict], key: str, now: float) -> dict:
+
+    # Artist weights
+    artist_weights: dict[str, float] = {}
+    for t in tracks:
+        a = _norm_artist(t.get("artist") or "")
+        if not a:
+            continue
+        artist_weights[a] = artist_weights.get(a, 0) + 1.0
+    total = sum(artist_weights.values()) or 1.0
+    for a in artist_weights:
+        artist_weights[a] /= total
+    top_artists = sorted(artist_weights.items(), key=lambda kv: -kv[1])[:8]
+
+    # Tag aggregation via Last.fm (top 5 artists; cheap-ish with cache)
+    tags: dict[str, float] = {}
+    if lastfm.LASTFM_API_KEY:
+        async def _artist_tags(name: str, weight: float):
+            async with _lastfm_sem:
+                ts = await lastfm.get_artist_top_tags(name, limit=8)
+                for ti, tag in enumerate(ts):
+                    tname = tag["name"].lower().strip()
+                    if not tname or tname in ("seen live", "favorites", "favourite"):
+                        continue
+                    # rank decay × artist weight × normalized count
+                    score = (1.0 / (1 + ti)) * weight * (tag.get("count", 0) / 100 + 0.3)
+                    tags[tname] = tags.get(tname, 0) + score
+
+        await asyncio.gather(*[
+            _artist_tags(name, w) for name, w in top_artists[:5]
+        ], return_exceptions=True)
+
+    top_tags = sorted(tags.items(), key=lambda kv: -kv[1])[:5]
+
+    profile = {
+        "artist_weights": artist_weights,
+        "top_artists": top_artists,
+        "tags": tags,
+        "top_tags": top_tags,
+    }
+    _profile_cache[key] = (now, profile)
+    _prune_profile_cache(now)
+    return profile
+
+
+def _weighted_sample_seeds(tracks: list[dict], profile: dict, k: int = 5) -> list[dict]:
+    """Pick seeds weighted by artist frequency, with light shuffling."""
+    if not tracks:
+        return []
+    weights = []
+    for t in tracks:
+        a = _norm_artist(t.get("artist") or "")
+        w = profile["artist_weights"].get(a, 0.01)
+        weights.append(w)
+    # Weighted sampling without replacement
+    pool = list(zip(tracks, weights))
+    picked: list[dict] = []
+    seen_artists: set[str] = set()
+    while pool and len(picked) < k:
+        total_w = sum(w for _, w in pool)
+        if total_w <= 0:
+            break
+        r = random.uniform(0, total_w)
+        acc = 0.0
+        idx = len(pool) - 1  # fallback to last (avoids index-0 bias on tiny rounding)
+        for i, (_, w) in enumerate(pool):
+            acc += w
+            if acc >= r:
+                idx = i
+                break
+        track, _ = pool.pop(idx)
+        a = _norm_artist(track.get("artist") or "")
+        # Prefer artist diversity in seeds
+        if a in seen_artists and len(pool) > 0:
+            # 50% chance to skip a duplicate artist
+            if random.random() < 0.5:
+                continue
+        seen_artists.add(a)
+        picked.append(track)
+    return picked
+
+
 async def get_playlist_recommendations(
     tracks: list[dict],
     source: str = "combined",
     limit: int = 20,
     exclude: list[dict] | None = None,
+    skipped: list[dict] | None = None,
+    accepted: list[dict] | None = None,
 ) -> list[dict]:
-    """Get recommendations based on a list of tracks (playlist/queue context).
-    Samples seed tracks, fetches from multiple sources, deduplicates, and filters."""
+    """Profile-driven recommendations.
+
+    1. Build playlist profile (artist weights + Last.fm tag centroid)
+    2. Weighted seed selection
+    3. Multi-source recall: per-artist radio, per-tag tracks, similar-artists, per-track similar
+    4. Score+rerank by tag overlap, multi-source agreement, feedback
+    5. Diversify (max 2 per artist)
+    """
     if not tracks:
         return []
 
-    # Sample up to 5 seed tracks
-    seeds = random.sample(tracks, min(5, len(tracks)))
+    profile = await _build_profile(tracks)
+    seeds = _weighted_sample_seeds(tracks, profile, k=5)
 
-    # Collect unique artists
-    artists = list({t.get("artist", "").split(",")[0].strip() for t in seeds if t.get("artist")})
+    playlist_artists = set(profile["artist_weights"].keys())
+    skipped_artists = {_norm_artist(t.get("artist") or "") for t in (skipped or [])}
+    skipped_keys = {_norm_key(t) for t in (skipped or [])}
+    accepted_artists = {_norm_artist(t.get("artist") or "") for t in (accepted or [])}
+    top_tag_names = {t[0] for t in profile["top_tags"]}
 
-    tasks = []
+    provider = app_settings._settings.get("search_provider", "deezer")
+    fallback = app_settings._settings.get("search_fallback", "")
 
-    # Last.fm + Deezer radio for each seed
-    for seed in seeds[:3]:  # limit concurrent calls
+    # ── Candidate recall (parallel) ────────────────────────────────
+    tasks: list = []
+    source_map: list[str] = []  # parallel list: which source each task belongs to
+
+    # A) per-seed radio (existing combined radio)
+    for seed in seeds[:3]:
         tasks.append(get_radio_tracks(
             source if source != "spotify" else "combined",
             seed.get("name", ""),
-            seed.get("artist", "").split(",")[0].strip(),
+            _norm_artist(seed.get("artist") or ""),
             seed.get("id", ""),
             limit=10,
         ))
+        source_map.append("seed_radio")
 
-    # Spotify recommendations
+    # B) per-top-artist radio for variety
+    for name, _w in profile["top_artists"][:3]:
+        tasks.append(_get_deezer_radio("", name, 10))
+        source_map.append("artist_radio")
+
+    # C) per-tag top tracks (centroid)
+    if lastfm.LASTFM_API_KEY:
+        for tname, _score in profile["top_tags"][:3]:
+            async def _tag_resolve(tn=tname):
+                raw = await lastfm.get_tag_tracks(tn, limit=15, page=1)
+                return await _resolve_lastfm_tracks(raw, provider, fallback)
+            tasks.append(_tag_resolve())
+            source_map.append("tag")
+
+    # D) similar-artists chain for top artist
+    if lastfm.LASTFM_API_KEY and profile["top_artists"]:
+        top_name = profile["top_artists"][0][0]
+        async def _sim_artists_chain(name=top_name):
+            sim = await lastfm.get_similar_artists(name, 6)
+            sub = await asyncio.gather(*[
+                lastfm.get_artist_top_tracks(s["name"], 3) for s in sim[:6]
+            ], return_exceptions=True)
+            collected = []
+            for r in sub:
+                if isinstance(r, list):
+                    collected.extend(r)
+            return await _resolve_lastfm_tracks(collected, provider, fallback)
+        tasks.append(_sim_artists_chain())
+        source_map.append("similar_artists")
+
+    # E) Spotify recommendations (best-effort; may 404 for new apps post-Nov 2024)
     if spotify.SPOTIFY_CLIENT_ID:
         tasks.append(_get_spotify_playlist_recs(seeds, limit=15))
+        source_map.append("spotify")
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    all_tracks = []
-    for r in results:
-        if isinstance(r, list):
-            all_tracks.extend(r)
+    # ── Aggregate candidates with source tracking ──────────────────
+    # candidate_key -> {"track": dict, "sources": set, "lastfm_match": float}
+    candidates: dict[tuple[str, str], dict] = {}
+    for src, res in zip(source_map, results):
+        if not isinstance(res, list):
+            continue
+        for t in res:
+            k = _norm_key(t)
+            if not k[0]:
+                continue
+            entry = candidates.get(k)
+            if entry is None:
+                entry = {"track": t, "sources": set(), "match": 0.0}
+                candidates[k] = entry
+            entry["sources"].add(src)
+            m = float(t.get("match") or 0)
+            if m > entry["match"]:
+                entry["match"] = m
 
-    deduped = _dedup(all_tracks)
+    # ── Exclude already-in-playlist + skipped ──────────────────────
+    exclude_keys = {_norm_key(t) for t in (exclude or [])}
+    exclude_keys |= skipped_keys
 
-    # Filter out tracks already in the playlist
-    if exclude:
-        exclude_keys = {
-            (t.get("name", "").lower().strip(), t.get("artist", "").lower().strip())
-            for t in exclude
-        }
-        deduped = [t for t in deduped if (t.get("name", "").lower().strip(), t.get("artist", "").lower().strip()) not in exclude_keys]
+    # ── Score candidates ───────────────────────────────────────────
+    scored: list[tuple[float, dict]] = []
 
-    return deduped[:limit]
+    async def _score_one(key: tuple[str, str], entry: dict):
+        if key in exclude_keys:
+            return
+        track = entry["track"]
+        artist_n = _norm_artist(track.get("artist") or "")
+        score = 0.0
+        # Multi-source agreement (strongest signal)
+        score += len(entry["sources"]) * 2.0
+        # Last.fm direct similarity score
+        score += entry["match"] * 3.0
+        # Tag overlap with playlist centroid (needs Last.fm lookup; gated)
+        if top_tag_names and lastfm.LASTFM_API_KEY and len(entry["sources"]) >= 1:
+            async with _lastfm_sem:
+                cand_tags = await lastfm.get_artist_top_tags(artist_n, limit=6)
+            cand_tag_set = {ct["name"].lower().strip() for ct in cand_tags}
+            overlap = len(cand_tag_set & top_tag_names)
+            score += overlap * 1.5
+        # Slight bonus if artist already in playlist (familiar) but not too strong
+        if artist_n in playlist_artists:
+            score += 0.5
+        # Penalty for skipped artists
+        if artist_n in skipped_artists:
+            score -= 4.0
+        # Boost for accepted artists (user-confirmed direction)
+        if artist_n in accepted_artists:
+            score += 2.0
+        scored.append((score, track))
+
+    await asyncio.gather(*[_score_one(k, v) for k, v in candidates.items()])
+
+    scored.sort(key=lambda x: -x[0])
+
+    # ── Diversify: max 2 per artist ────────────────────────────────
+    per_artist: dict[str, int] = {}
+    final: list[dict] = []
+    for _s, t in scored:
+        a = _norm_artist(t.get("artist") or "")
+        if per_artist.get(a, 0) >= 2:
+            continue
+        per_artist[a] = per_artist.get(a, 0) + 1
+        final.append(t)
+        if len(final) >= limit:
+            break
+
+    return final
 
 
 async def _get_spotify_playlist_recs(seeds: list[dict], limit: int = 15) -> list[dict]:

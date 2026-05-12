@@ -140,5 +140,8 @@ async def get_playlist_recommendations(
     if not req.tracks:
         raise HTTPException(400, "No tracks provided")
     source = app_settings._settings.get("recommendation_source", "combined")
-    recs = await radio.get_playlist_recommendations(req.tracks, source, req.limit, exclude=req.tracks)
+    recs = await radio.get_playlist_recommendations(
+        req.tracks, source, req.limit,
+        exclude=req.tracks, skipped=req.skipped, accepted=req.accepted,
+    )
     return {"tracks": recs}

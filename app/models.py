@@ -120,6 +120,8 @@ class DeleteAlbumRequest(BaseModel):
 class RecommendationRequest(BaseModel):
     tracks: list[dict]
     limit: int = 15
+    skipped: list[dict] = []
+    accepted: list[dict] = []
 
 
 class PodcastSubRequest(BaseModel):

@@ -7,7 +7,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
 import { fetchDjData, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
 
 // ── Dual-deck Web Audio API crossfade engine with DJ mixing ──
@@ -332,10 +332,10 @@ export function addToQueue(items, playNow = false) {
 }
 
 // ── Load and Play Current Track ──
-export function loadAndPlay() {
+export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
-  // Pause prefetch immediately — current track gets all bandwidth
-  pausePrefetch();
+  // Abort prefetch downloads — current track gets all bandwidth
+  abortPrefetch();
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
   const item = store.playerQueue[store.playerIndex];
@@ -366,13 +366,14 @@ export function loadAndPlay() {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    let cached = getCachedUrl(cleanName, cleanArtist);
-    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
-    const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
 
     const currentDeck = _activeDeckEl();
     if (!currentDeck.paused && currentDeck.src) {
-      // Crossfade: full DJ (with cached blob) or simple gain fade (uncached stream)
+      // Crossfade: wait for cache (blob = seekable = better transitions)
+      let cached = getCachedUrl(cleanName, cleanArtist);
+      if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 2000); if (w) cached = w; }
+      const src = cached || streamUrl;
       pausePrefetch();
       if (!_inDjData) {
         fetchDjData(cleanName, cleanArtist).then(d => { _inDjData = d; }).catch(() => {});
@@ -387,14 +388,14 @@ export function loadAndPlay() {
       nextDeck.load();
       nextDeck.play().catch(() => {});
     } else {
-      // Cold start — nothing currently playing
+      // Cold start — play immediately, no cache wait
       if (_crossfading && _fadingOutDeck) {
         resetDeckAfterTransition(_deckDesc(_fadingOutDeck));
         _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
         clearTimeout(_crossfadeTimer); _crossfading = false;
       }
       const deck = currentDeck;
-      deck.src = src;
+      deck.src = getCachedUrl(cleanName, cleanArtist) || streamUrl;
       deck.load();
       deck.play().catch(() => {});
       if (_activeGain()) {
@@ -461,13 +462,15 @@ function updateDownloadButtons(item) {
 
 export function updatePlaylistBadge() {
   const badge = $('#fpPlaylistBadge');
-  if (!badge) return;
-  if (store.playlistMode) {
-    badge.textContent = store.playlistMode.name;
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
+  if (badge) {
+    if (store.playlistMode) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
+    else badge.style.display = 'none';
   }
+  const show = store.playlistMode ? '' : 'none';
+  const rm1 = $('#playerRemoveFromPlaylist');
+  const rm2 = $('#fpRemoveFromPlaylist');
+  if (rm1) rm1.style.display = show;
+  if (rm2) rm2.style.display = show;
 }
 
 export function showPlayerBar() {
@@ -531,11 +534,30 @@ async function _autoCastAndPlay(item, cleanName, cleanArtist) {
 
 // ── Next / Prev ──
 let _lastNextTime = 0;
-export function nextTrack() {
+export function nextTrack(opts = {}) {
   // Throttle: ignore if called again within 2s (prevents chain-skip)
   const now = Date.now();
-  if (now - _lastNextTime < 2000) return;
+  if (now - _lastNextTime < 500) return;
   _lastNextTime = now;
+
+  // ── Record skip/accept for recommendation feedback (only on user/end paths) ──
+  const reason = opts.reason || 'user';
+  if (reason === 'user' || reason === 'ended') {
+    try {
+      const cur = store.playerQueue[store.playerIndex];
+      if (cur && cur.name) {
+        const deck = _activeDeckEl();
+        const dur = deck && deck.duration ? deck.duration : 0;
+        const pos = deck && deck.currentTime ? deck.currentTime : 0;
+        const ratio = dur > 0 ? pos / dur : 0;
+        import('./recommendations.js').then(m => {
+          if (reason === 'ended') m.recordAccept(cur);
+          else if (dur > 0 && ratio < 0.5 && pos < 30) m.recordSkip(cur);
+          else if (ratio > 0.7) m.recordAccept(cur);
+        });
+      }
+    } catch {}
+  }
 
   if (store.castDevice) {
     _castTransitioning = true;
@@ -620,7 +642,7 @@ function _nextTrackInQueue() {
 
 // ── Play a track from recommendations (virtual, not in queue) ──
 let _currentRecItem = null;
-export function playRecTrack(item) {
+export async function playRecTrack(item) {
   _currentRecItem = item;
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -648,9 +670,9 @@ export function playRecTrack(item) {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    let cached = getCachedUrl(cleanName, cleanArtist);
-    if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 8000); if (w) cached = w; }
-    const src = cached || `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const cached = getCachedUrl(cleanName, cleanArtist);
+    const src = cached || streamUrl;
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {
       pausePrefetch();
@@ -888,7 +910,7 @@ export function init() {
         deck.currentTime = 0;
         deck.play().catch(() => {});
       } else {
-        nextTrack();
+        nextTrack({ reason: 'ended' });
       }
     });
     deck.addEventListener('error', () => {
@@ -906,7 +928,7 @@ export function init() {
         _crossfading = false;
       }
       showToast('Stream error, skipping...');
-      setTimeout(() => nextTrack(), 1000);
+      setTimeout(() => nextTrack({ reason: 'error' }), 1000);
     });
   });
 
@@ -1027,7 +1049,7 @@ export function init() {
       _deckB.volume = store.playerVolume;
     }
   });
-  function _seekFromEvent(bar, e) {
+  async function _seekFromEvent(bar, e) {
     const dur = _getDuration();
     if (!dur) return;
     const rect = bar.getBoundingClientRect();
@@ -1042,6 +1064,44 @@ export function init() {
   const miniBar = $('#playerProgressBar');
   miniBar.addEventListener('click', (e) => _seekFromEvent(miniBar, e));
   miniBar.addEventListener('touchstart', (e) => { e.preventDefault(); _seekFromEvent(miniBar, e); }, { passive: false });
+
+  // Add to playlist
+  async function _addToPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item) return;
+    try {
+      const data = await apiJson('/api/library/playlists');
+      const playlists = data.playlists || [];
+      if (!playlists.length) { showToast('No playlists. Create one in Library first.'); return; }
+      const { showPlaylistPicker } = await import('./utils.js');
+      const picked = await showPlaylistPicker(playlists, { multi: false });
+      if (!picked) return;
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${picked.id}/add-and-download`, {
+        method: 'POST',
+        body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
+      });
+      showToast(`Added to ${picked.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);
+  if ($('#fpAddToPlaylist')) $('#fpAddToPlaylist').addEventListener('click', _addToPlaylist);
+
+  async function _removeFromPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item || !store.playlistMode) return;
+    try {
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
+        method: 'POST', body: { name: cleanName, artist: cleanArtist },
+      });
+      showToast(`Removed from ${store.playlistMode.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
+  if ($('#fpRemoveFromPlaylist')) $('#fpRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
 
   // Download current track
   $('#playerDownloadBtn').addEventListener('click', async () => {
@@ -1143,7 +1203,7 @@ export function init() {
   }
 
   // Cast state vars are module-level (see above init)
-  function _startCastPoll() {
+  async function _startCastPoll() {
     clearInterval(store.castPollTimer);
     _castLastState = '';
     store.castPollTimer = setInterval(async () => {

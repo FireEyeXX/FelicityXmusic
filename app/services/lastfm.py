@@ -122,6 +122,24 @@ async def get_artist_top_tracks(artist: str, limit: int = 10) -> list[dict]:
     ]
 
 
+async def get_artist_top_tags(artist: str, limit: int = 10) -> list[dict]:
+    try:
+        data = await _get("artist.getTopTags", {"artist": artist})
+    except Exception:
+        return []
+    tags = data.get("toptags", {}).get("tag", [])
+    return [{"name": t.get("name", ""), "count": int(t.get("count", 0))} for t in tags[:limit] if t.get("name")]
+
+
+async def get_track_top_tags(track: str, artist: str, limit: int = 10) -> list[dict]:
+    try:
+        data = await _get("track.getTopTags", {"track": track, "artist": artist})
+    except Exception:
+        return []
+    tags = data.get("toptags", {}).get("tag", [])
+    return [{"name": t.get("name", ""), "count": int(t.get("count", 0))} for t in tags[:limit] if t.get("name")]
+
+
 async def get_tag_artists(tag: str, limit: int = 20, page: int = 1) -> list[dict]:
     data = await _get("tag.getTopArtists", {"tag": tag, "limit": limit, "page": page})
     artists = data.get("topartists", {}).get("artist", [])
