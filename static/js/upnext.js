@@ -26,9 +26,20 @@ export async function initUpNext() {
     // Only adopt Up Next as the active playlist mode if not already in a named one
     if (!store.playlistMode) {
       store.playlistMode = { id: pl.id, name: displayPlaylistName(pl.name) };
-      // Refresh playlist badge in UI (avoid circular import via lazy dynamic import)
       const badge = document.getElementById('fpPlaylistBadge');
       if (badge) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
+    }
+    // Hydrate local playback queue from Up Next when local state is empty.
+    // This recovers the cross-session "what was I listening to" without
+    // overriding an in-progress local queue.
+    if ((!store.playerQueue || !store.playerQueue.length) && pl.tracks && pl.tracks.length) {
+      store.playerQueue = pl.tracks;
+      store.playerIndex = 0;
+      // Rebuild visible queue panel(s)
+      try {
+        const q = await import('./queue.js');
+        q.renderQueue && q.renderQueue();
+      } catch {}
     }
     return pl;
   } catch (e) {
@@ -58,6 +69,24 @@ export function isUpNextActive() {
   // We display "Up Next"; the raw name starts with __upnext_. Easiest check:
   // compare to display constant.
   return !!(store.playlistMode && store.playlistMode.name === UPNEXT_DISPLAY);
+}
+
+// Replace local playback queue AND mirror to Up Next playlist on Navidrome.
+// Mirror is fire-and-forget so playback starts immediately; failures are logged
+// but don't block. Only mirrors when Up Next is the active playlist (avoid
+// clobbering a named playlist the user already opened).
+export async function playTracks(tracks) {
+  if (!tracks || !tracks.length) return;
+  // Local playback first — instant
+  store.playerQueue = tracks;
+  store.playerIndex = 0;
+  const playerMod = await import('./player.js');
+  playerMod.loadAndPlay();
+  // Mirror in background when Up Next is the current target
+  const id = activePlaylistId();
+  if (id && isUpNextActive()) {
+    replaceByName(id, tracks).catch(e => console.warn('Up Next mirror failed:', e));
+  }
 }
 
 export { UPNEXT_DISPLAY };

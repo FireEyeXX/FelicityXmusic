@@ -81,9 +81,9 @@ async function _playLibraryPlaylist(pl, playNow) {
     store.playlistMode = { id: pl.id, name: pl.name };
     const m = await import('./player.js');
     if (playNow) {
-      store.playerQueue = tracks;
-      store.playerIndex = 0;
-      m.loadAndPlay();
+      // Mode is named playlist — playTracks will not mirror (guarded by isUpNextActive)
+      const u = await import('./upnext.js');
+      u.playTracks(tracks);
     } else {
       m.addToQueue(tracks);
     }
@@ -246,11 +246,7 @@ export function init() {
     const tracks = getLibTracksForPlayer();
     if (tracks.length) {
       store.playlistMode = currentLibPlaylistId ? { id: currentLibPlaylistId, name: currentLibPlaylistName } : null;
-      import('./player.js').then(m => {
-        store.playerQueue = tracks;
-        store.playerIndex = 0;
-        m.loadAndPlay();
-      });
+      import('./upnext.js').then(m => m.playTracks(tracks));
     }
   });
 

@@ -408,11 +408,7 @@ export function init() {
   $('#playPlaylist').addEventListener('click', () => {
     const tracks = getPlaylistTracksForPlayer();
     if (tracks.length) {
-      import('./player.js').then(m => {
-        store.playerQueue = tracks;
-        store.playerIndex = 0;
-        m.loadAndPlay();
-      });
+      import('./upnext.js').then(m => m.playTracks(tracks));
     }
   });
   $('#queuePlaylist').addEventListener('click', () => {

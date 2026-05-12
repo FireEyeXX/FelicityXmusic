@@ -1320,7 +1320,10 @@ export function init() {
     if (!card) return;
     const item = JSON.parse(card.dataset.item);
     const tracks = await resolveItemTracks(item);
-    if (tracks.length) { store.playerQueue = tracks; store.playerIndex = 0; loadAndPlay(); }
+    if (tracks.length) {
+      const u = await import('./upnext.js');
+      u.playTracks(tracks);
+    }
   });
 
   // Download button on cards (event delegation)

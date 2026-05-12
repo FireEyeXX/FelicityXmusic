@@ -274,9 +274,12 @@ export function init() {
     if (!store.modalItem) return;
     const item = { ...store.modalItem };
     closeModal();
-    const { resolveItemTracks, loadAndPlay } = await import('./player.js');
+    const { resolveItemTracks } = await import('./player.js');
     const tracks = await resolveItemTracks(item);
-    if (tracks.length) { store.playerQueue = tracks; store.playerIndex = 0; loadAndPlay(); }
+    if (tracks.length) {
+      const u = await import('./upnext.js');
+      u.playTracks(tracks);
+    }
   });
   $('#modalAddQueue').addEventListener('click', async () => {
     if (!store.modalItem) return;

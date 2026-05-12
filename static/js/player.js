@@ -176,13 +176,15 @@ function updateDownloadButtons(item) {
 
 export function updatePlaylistBadge() {
   const badge = $('#fpPlaylistBadge');
-  if (!badge) return;
-  if (store.playlistMode) {
-    badge.textContent = store.playlistMode.name;
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
+  if (badge) {
+    if (store.playlistMode) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
+    else badge.style.display = 'none';
   }
+  const show = store.playlistMode ? '' : 'none';
+  const rm1 = $('#playerRemoveFromPlaylist');
+  const rm2 = $('#fpRemoveFromPlaylist');
+  if (rm1) rm1.style.display = show;
+  if (rm2) rm2.style.display = show;
 }
 
 export function showPlayerBar() {
@@ -596,7 +598,7 @@ export function init() {
       audio.volume = store.playerVolume;
     }
   });
-  function _seekFromEvent(bar, e) {
+  async function _seekFromEvent(bar, e) {
     const dur = _getDuration();
     if (!dur) return;
     const rect = bar.getBoundingClientRect();
@@ -611,6 +613,44 @@ export function init() {
   const miniBar = $('#playerProgressBar');
   miniBar.addEventListener('click', (e) => _seekFromEvent(miniBar, e));
   miniBar.addEventListener('touchstart', (e) => { e.preventDefault(); _seekFromEvent(miniBar, e); }, { passive: false });
+
+  // Add to playlist
+  async function _addToPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item) return;
+    try {
+      const data = await apiJson('/api/library/playlists');
+      const playlists = data.playlists || [];
+      if (!playlists.length) { showToast('No playlists. Create one in Library first.'); return; }
+      const { showPlaylistPicker } = await import('./utils.js');
+      const picked = await showPlaylistPicker(playlists, { multi: false });
+      if (!picked) return;
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${picked.id}/add-and-download`, {
+        method: 'POST',
+        body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
+      });
+      showToast(`Added to ${picked.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);
+  if ($('#fpAddToPlaylist')) $('#fpAddToPlaylist').addEventListener('click', _addToPlaylist);
+
+  async function _removeFromPlaylist() {
+    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    if (!item || !store.playlistMode) return;
+    try {
+      const cleanName = _decodeEntities(item.name || '');
+      const cleanArtist = _decodeEntities(item.artist || '');
+      await apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
+        method: 'POST', body: { name: cleanName, artist: cleanArtist },
+      });
+      showToast(`Removed from ${store.playlistMode.name}`);
+    } catch (e) { showToast('Failed: ' + (e.message || '')); }
+  }
+  $('#playerRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
+  if ($('#fpRemoveFromPlaylist')) $('#fpRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);
 
   // Download current track
   $('#playerDownloadBtn').addEventListener('click', async () => {
@@ -712,7 +752,7 @@ export function init() {
   }
 
   // Cast state vars are module-level (see above init)
-  function _startCastPoll() {
+  async function _startCastPoll() {
     clearInterval(store.castPollTimer);
     _castLastState = '';
     store.castPollTimer = setInterval(async () => {
@@ -776,7 +816,10 @@ export function init() {
     if (!card) return;
     const item = JSON.parse(card.dataset.item);
     const tracks = await resolveItemTracks(item);
-    if (tracks.length) { store.playerQueue = tracks; store.playerIndex = 0; loadAndPlay(); }
+    if (tracks.length) {
+      const u = await import('./upnext.js');
+      u.playTracks(tracks);
+    }
   });
 
   // Download button on cards (event delegation)
