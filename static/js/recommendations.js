@@ -182,6 +182,10 @@ export function playRecIndex(idx) {
   if (!track) return;
   recsPlayingIdx = idx;
   import('./player.js').then(m => m.playRecTrack(track));
+  import('./queue.js').then(m => {
+    if (store.queuePanelOpen && m.closeQueuePanel) m.closeQueuePanel();
+    if (store.fpQueuePanelOpen && m.closeFpQueuePanel) m.closeFpQueuePanel();
+  });
   renderRecs();
 }
 
@@ -203,6 +207,12 @@ function _attachRecsHandlers(el) {
       if (!track) return;
       recsPlayingIdx = idx;
       import('./player.js').then(m => m.playRecTrack(track));
+      // Close any open queue panel so player controls are accessible
+      // (queue-panel sits above the player bar via z-index)
+      import('./queue.js').then(m => {
+        if (store.queuePanelOpen && m.closeQueuePanel) m.closeQueuePanel();
+        if (store.fpQueuePanelOpen && m.closeFpQueuePanel) m.closeFpQueuePanel();
+      });
       renderRecs();
     });
   });
