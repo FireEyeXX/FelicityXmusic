@@ -5,6 +5,7 @@ import { $, $$, esc, showToast, historyBack, showPlaylistPicker } from './utils.
 import { apiJson } from './api.js';
 import { renderResults } from './search.js';
 import { fetchPlaylistBpm, addBpmBadges, createBpmFilter, addScanButton } from './bpm.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 let libraryCache = null;
 let currentLibPlaylistId = null;
@@ -43,10 +44,79 @@ function renderLibraryGrid(playlists, grid) {
 
   $$('.lib-card', grid).forEach(card => {
     card.addEventListener('click', () => {
+      if (wasLongPress(card)) return;
       const pl = playlists[card.dataset.libIdx];
       if (pl) loadLibraryDetail(pl.id);
     });
   });
+  attachContextMenu(grid, {
+    selector: '.lib-card',
+    getItem: (targetEl) => {
+      const pl = playlists[parseInt(targetEl.dataset.libIdx)];
+      if (!pl) return null;
+      return {
+        title: pl.name,
+        actions: [
+          { label: 'Open', icon: '&#128194;', onClick: () => loadLibraryDetail(pl.id) },
+          { label: 'Play all', icon: '&#9654;', onClick: () => _playLibraryPlaylist(pl, true) },
+          { label: 'Queue all', icon: '+', onClick: () => _playLibraryPlaylist(pl, false) },
+          { divider: true },
+          { label: 'Rename…', icon: '&#9998;', onClick: () => _renameLibraryPlaylist(pl) },
+          { label: 'Delete playlist', icon: '&times;', danger: true, onClick: () => _deleteLibraryPlaylist(pl) },
+        ],
+      };
+    },
+  });
+}
+
+async function _fetchPlaylistTracks(id) {
+  const data = await apiJson(`/api/library/playlist/${id}`);
+  return data.tracks || [];
+}
+
+async function _playLibraryPlaylist(pl, playNow) {
+  try {
+    const tracks = await _fetchPlaylistTracks(pl.id);
+    if (!tracks.length) { showToast('Empty playlist'); return; }
+    store.playlistMode = { id: pl.id, name: pl.name };
+    const m = await import('./player.js');
+    if (playNow) {
+      store.playerQueue = tracks;
+      store.playerIndex = 0;
+      m.loadAndPlay();
+    } else {
+      m.addToQueue(tracks);
+    }
+  } catch (e) {
+    showToast('Failed: ' + e.message);
+  }
+}
+
+async function _renameLibraryPlaylist(pl) {
+  const name = prompt('Rename playlist:', pl.name);
+  if (!name || !name.trim() || name.trim() === pl.name) return;
+  try {
+    await apiJson(`/api/library/playlist/${pl.id}/rename`, {
+      method: 'PUT', body: { name: name.trim() },
+    });
+    libraryCache = null;
+    loadLibrary();
+    showToast('Renamed');
+  } catch (e) {
+    showToast('Rename failed');
+  }
+}
+
+async function _deleteLibraryPlaylist(pl) {
+  if (!confirm(`Delete playlist "${pl.name}"?`)) return;
+  try {
+    await apiJson(`/api/library/playlist/${pl.id}`, { method: 'DELETE' });
+    libraryCache = null;
+    loadLibrary();
+    showToast('Deleted');
+  } catch (e) {
+    showToast('Delete failed');
+  }
 }
 
 // ── Playlist Detail ──
@@ -71,6 +141,7 @@ async function loadLibraryDetail(id) {
     $('#libDetailCount').textContent = `${currentLibPlaylistTracks.length} tracks`;
     renderResults(currentLibPlaylistTracks, '#libraryTracks');
     _addBulkCheckboxes();
+    _addRemoveButtons(id);
     // BPM: filter bar with scan button, fetch cached BPM, add badges
     _initBpmFilter(id);
     fetchPlaylistBpm(id).then(() => {
@@ -110,6 +181,36 @@ function _updateBulkUI() {
   const count = $('#libBulkCount');
   if (actions) actions.style.display = _bulkSelected.size > 0 ? 'flex' : 'none';
   if (count) count.textContent = `${_bulkSelected.size} selected`;
+}
+
+function _addRemoveButtons(playlistId) {
+  $$('#libraryTracks .card').forEach((card, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'lib-track-remove';
+    btn.title = 'Remove from playlist';
+    btn.innerHTML = '&times;';
+    btn.style.cssText = 'position:absolute;top:8px;right:8px;width:24px;height:24px;border:none;background:rgba(0,0,0,.5);color:var(--text-muted);border-radius:50%;cursor:pointer;font-size:16px;line-height:1;z-index:2;display:flex;align-items:center;justify-content:center;';
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await apiJson(`/api/library/playlist/${playlistId}/tracks`, {
+          method: 'DELETE', body: { indices: [i] },
+        });
+        card.remove();
+        currentLibPlaylistTracks.splice(i, 1);
+        $('#libDetailCount').textContent = `${currentLibPlaylistTracks.length} tracks`;
+        showToast('Removed from playlist');
+        // Re-index remaining buttons
+        $$('#libraryTracks .lib-track-remove').forEach((b, j) => {
+          b.replaceWith(b); // will lose handler, so just reload
+        });
+        // Simpler: reload the whole detail
+        openLibraryDetail(playlistId);
+      } catch (err) { showToast('Failed: ' + (err.message || '')); }
+    });
+    card.style.position = 'relative';
+    card.appendChild(btn);
+  });
 }
 
 function _initBpmFilter(playlistId) {

@@ -3,11 +3,48 @@
 import { store } from './store.js';
 import { $, $$, esc, showToast, showPlaylistPicker } from './utils.js';
 import { apiJson } from './api.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 let recsCache = [];
 let recsLoading = false;
 let recsDirty = true;
 let recsPlayingIdx = -1; // -1 = not playing from recs
+
+// ── Feedback log (skipped/accepted) — persisted in localStorage ──
+const FB_KEY = 'ms_recs_feedback_v1';
+const FB_MAX = 60;          // cap size per list
+const FB_TTL_DAYS = 14;
+
+function _loadFeedback() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FB_KEY) || '{}');
+    const now = Date.now();
+    const fresh = (arr) => (arr || []).filter(e => (now - (e.ts || 0)) < FB_TTL_DAYS * 86400000);
+    return { skipped: fresh(raw.skipped), accepted: fresh(raw.accepted) };
+  } catch { return { skipped: [], accepted: [] }; }
+}
+
+function _saveFeedback(fb) {
+  try { localStorage.setItem(FB_KEY, JSON.stringify(fb)); } catch {}
+}
+
+export function recordSkip(track) {
+  if (!track || !track.name) return;
+  const fb = _loadFeedback();
+  fb.skipped.push({ name: track.name, artist: track.artist || '', ts: Date.now() });
+  if (fb.skipped.length > FB_MAX) fb.skipped = fb.skipped.slice(-FB_MAX);
+  _saveFeedback(fb);
+  recsDirty = true;
+}
+
+export function recordAccept(track) {
+  if (!track || !track.name) return;
+  const fb = _loadFeedback();
+  fb.accepted.push({ name: track.name, artist: track.artist || '', ts: Date.now() });
+  if (fb.accepted.length > FB_MAX) fb.accepted = fb.accepted.slice(-FB_MAX);
+  _saveFeedback(fb);
+  recsDirty = true;
+}
 
 export function isPlayingRec() { return recsPlayingIdx >= 0; }
 
@@ -70,9 +107,15 @@ async function loadRecs() {
   recsLoading = true;
   renderLoading();
   try {
+    const fb = _loadFeedback();
     const data = await apiJson('/api/player/recommendations', {
       method: 'POST',
-      body: { tracks: store.playerQueue.slice(-20), limit: 10 },
+      body: {
+        tracks: store.playerQueue.slice(-30),
+        limit: 20,
+        skipped: fb.skipped.slice(-30),
+        accepted: fb.accepted.slice(-30),
+      },
     });
     recsCache = data.tracks || [];
     recsDirty = false;
@@ -133,10 +176,27 @@ function _recsHtml() {
     </div>`).join('');
 }
 
+export function playRecIndex(idx) {
+  if (typeof idx !== 'number' || idx < 0 || idx >= recsCache.length) return;
+  const track = recsCache[idx];
+  if (!track) return;
+  recsPlayingIdx = idx;
+  import('./player.js').then(m => m.playRecTrack(track));
+  renderRecs();
+}
+
+export function dismissRec(idx) {
+  if (typeof idx !== 'number' || idx < 0 || idx >= recsCache.length) return;
+  recsCache.splice(idx, 1);
+  if (recsPlayingIdx >= idx) recsPlayingIdx = Math.max(-1, recsPlayingIdx - 1);
+  renderRecs();
+}
+
 function _attachRecsHandlers(el) {
   // Click on rec = play it directly (virtual, not added to queue)
   $$('.rec-item', el).forEach(item => {
     item.addEventListener('click', (e) => {
+      if (wasLongPress()) return;
       if (e.target.closest('.rec-add-queue') || e.target.closest('.rec-add-playlist')) return;
       const idx = parseInt(item.dataset.recIdx);
       const track = recsCache[idx];
@@ -178,6 +238,15 @@ function _attachRecsHandlers(el) {
         showToast(e.message || 'Failed to add to playlist');
       }
     });
+  });
+  attachContextMenu(el, {
+    selector: '.rec-item',
+    getItem: (targetEl) => {
+      const idx = parseInt(targetEl.dataset.recIdx);
+      const item = recsCache[idx];
+      if (!item) return null;
+      return { item, type: 'recommendation', context: { recIndex: idx } };
+    },
   });
 }
 

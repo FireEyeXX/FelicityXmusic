@@ -1,9 +1,10 @@
 // podcasts.js — Podcasts page, subscriptions, episodes, bulk actions, sync
 
 import { store } from './store.js';
-import { $, $$, esc, formatSize, historyBack } from './utils.js';
+import { $, $$, esc, formatSize, historyBack, showToast } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // ── Load Podcast Subscriptions ──
 export async function loadPodcastSubs() {
@@ -79,7 +80,25 @@ export async function loadPodcasts() {
       </div>
     `).join('');
     $$('.podcast-show-card', list).forEach(card => {
-      card.addEventListener('click', () => openPodcastShow(card.dataset.show));
+      card.addEventListener('click', () => {
+        if (wasLongPress(card)) return;
+        openPodcastShow(card.dataset.show);
+      });
+    });
+    attachContextMenu(list, {
+      selector: '.podcast-show-card',
+      getItem: (targetEl) => {
+        const showName = targetEl.dataset.show;
+        if (!showName) return null;
+        return {
+          title: showName,
+          actions: [
+            { label: 'Open episodes', icon: '&#128194;', onClick: () => openPodcastShow(showName) },
+            { divider: true },
+            { label: 'Delete entire show…', icon: '&times;', danger: true, onClick: () => _deleteEntireShow(showName) },
+          ],
+        };
+      },
     });
   } catch (e) {
     list.innerHTML = `<div class="empty-state"><p>Failed to load podcasts</p></div>`;
@@ -134,6 +153,22 @@ export async function openPodcastShow(showName) {
         } catch (err) { alert('Delete failed: ' + err.message); }
       });
     });
+    // Episode context menu
+    attachContextMenu(epList, {
+      selector: '.podcast-ep-row',
+      getItem: (targetEl) => {
+        const showN = targetEl.dataset.show;
+        const fileN = targetEl.dataset.file;
+        const epName = targetEl.querySelector('.ep-name')?.textContent || fileN;
+        if (!showN || !fileN) return null;
+        return {
+          title: epName,
+          actions: [
+            { label: 'Delete episode', icon: '&times;', danger: true, onClick: () => _deleteEpisode(showN, fileN, epName, epList) },
+          ],
+        };
+      },
+    });
     // Checkbox change -> update bulk bar
     $$('.ep-check', epList).forEach(cb => {
       cb.addEventListener('change', updateBulkBar);
@@ -163,6 +198,34 @@ export function updateBulkBar() {
 }
 
 // ── Init ──
+async function _deleteEntireShow(showName) {
+  if (!confirm(`Delete entire show "${showName}" and ALL its episodes?`)) return;
+  try {
+    await apiJson(`/api/podcasts/${encodeURIComponent(showName)}`, { method: 'DELETE' });
+    showToast(`Deleted "${showName}"`);
+    closePodcastShow();
+    loadPodcasts();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+async function _deleteEpisode(showN, fileN, epName, epList) {
+  if (!confirm(`Delete "${epName}"?`)) return;
+  try {
+    await apiJson(`/api/podcasts/${encodeURIComponent(showN)}/${encodeURIComponent(fileN)}`, { method: 'DELETE' });
+    const row = epList.querySelector(`.podcast-ep-row[data-file="${fileN.replace(/"/g, '\\"')}"]`);
+    if (row) row.remove();
+    updateBulkBar();
+    if (!epList.querySelectorAll('.podcast-ep-row').length) {
+      closePodcastShow();
+      loadPodcasts();
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
 export function init() {
   $('#backToPodcasts').addEventListener('click', () => closePodcastShow());
   $('#deleteShowBtn').addEventListener('click', async () => {

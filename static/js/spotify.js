@@ -6,6 +6,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderResults, checkLibrary } from './search.js';
 import { switchPage } from './router.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // ── Tab Switching ──
 function loadSpTab(tab) {
@@ -258,10 +259,19 @@ export async function loadArtistDetail(id, fromPage) {
     `).join('');
     $$('.card', albumsEl).forEach(card => {
       card.addEventListener('click', (e) => {
+        if (wasLongPress()) return;
         if (e.target.closest('.card-dl-btn')) return;
         const album = store.currentArtistAlbums[card.dataset.albumIdx];
         if (album) openModal(album);
       });
+    });
+    attachContextMenu(albumsEl, {
+      selector: '.card[data-album-idx]',
+      getItem: (targetEl) => {
+        const album = store.currentArtistAlbums[parseInt(targetEl.dataset.albumIdx)];
+        if (!album) return null;
+        return { item: { ...album, type: 'album' }, type: 'album', context: { inLibrary: !!album.inLibrary } };
+      },
     });
     $$('.card-dl-btn', albumsEl).forEach(btn => {
       btn.addEventListener('click', (e) => {

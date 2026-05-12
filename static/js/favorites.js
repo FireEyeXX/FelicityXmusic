@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { $, $$, esc, showToast } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // ── Load Favorited Artist IDs ──
 export async function loadFavoritedArtistIds() {
@@ -61,10 +62,20 @@ export async function loadFavorites() {
     `).join('');
     $$('.fav-card', grid).forEach(card => {
       card.addEventListener('click', () => {
+        if (wasLongPress(card)) return;
         const artistId = card.dataset.artistId;
         const artist = artists.find(a => a.id === artistId);
         if (artist) openFavoriteModal(artist);
       });
+    });
+    attachContextMenu(grid, {
+      selector: '.fav-card[data-item]',
+      getItem: (targetEl) => {
+        try {
+          const item = JSON.parse(targetEl.dataset.item);
+          return { item, type: 'artist', context: { isFavorite: true } };
+        } catch { return null; }
+      },
     });
   } catch (e) {
     grid.innerHTML = `<div class="empty-state"><p>Failed to load favorites: ${e.message}</p></div>`;

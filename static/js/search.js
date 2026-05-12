@@ -5,6 +5,7 @@ import { $, $$, esc, formatDuration } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { loadPlaylistDetail, loadShowDetail, loadArtistDetail } from './spotify.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // ── Card Helper Functions ──
 export function cardPlayBtn(item) {
@@ -71,8 +72,10 @@ export function renderResults(items, container, fromPage) {
 
   $$('.card', el).forEach(card => {
     card.addEventListener('click', (e) => {
+      if (wasLongPress()) return;
       if (e.target.closest('.clickable') || e.target.closest('.card-play-btn') || e.target.closest('.card-dl-btn') || e.target.closest('.card-radio-btn') || e.target.closest('.card-fav-btn')) return;
-      const item = JSON.parse(card.dataset.item);
+      let item;
+      try { item = JSON.parse(card.dataset.item); } catch { return; }
       if (item.type === 'playlist' && item.id) {
         loadPlaylistDetail(item.id, item.url, fromPage);
       } else if (item.type === 'show' && item.id) {
@@ -84,7 +87,21 @@ export function renderResults(items, container, fromPage) {
       }
     });
   });
+  _attachCardContextMenu(el);
   checkLibrary(items, el);
+}
+
+function _attachCardContextMenu(el) {
+  attachContextMenu(el, {
+    selector: '.card[data-item]',
+    getItem: (targetEl) => {
+      try {
+        const item = JSON.parse(targetEl.dataset.item);
+        const type = item.type || 'track';
+        return { item, type, context: { inLibrary: !!item.inLibrary } };
+      } catch { return null; }
+    },
+  });
 }
 
 // ── Library Check ──
@@ -189,6 +206,7 @@ export async function doSearch(append) {
       const newCards = Array.from(fragment.children);
       newCards.forEach(card => {
         card.addEventListener('click', (e) => {
+          if (wasLongPress()) return;
           if (e.target.closest('.clickable') || e.target.closest('.card-play-btn') || e.target.closest('.card-dl-btn') || e.target.closest('.card-radio-btn') || e.target.closest('.card-fav-btn')) return;
           const item = JSON.parse(card.dataset.item);
           if (item.type === 'playlist' && item.id) {

@@ -1,0 +1,498 @@
+// contextmenu.js — Universal right-click / long-press menu
+//
+// Usage:
+//   import { attachContextMenu } from './contextmenu.js';
+//   attachContextMenu(rootEl, {
+//     getItem: (targetEl) => ({ item: {...}, type: 'track', context: {...} }) | null
+//   });
+//
+// The getItem callback receives the deepest element with `data-ctx-item` (or a
+// fallback selector). Returning null cancels the menu.
+
+import { $, esc, showToast, showPlaylistPicker } from './utils.js';
+import { apiJson } from './api.js';
+import { openModal } from './downloads.js';
+import { store } from './store.js';
+
+const LONG_PRESS_MS = 480;
+const MOVE_THRESHOLD = 10; // px
+const SUPPRESS_MS = 600;
+
+let _menuEl = null;
+let _onDocClick = null;
+let _suppressClickUntil = 0;
+let _suppressTarget = null;
+
+// Click suppression flag exported so card handlers can skip click after a long-press.
+// Scoped: only suppresses on the element where the long-press fired.
+export function wasLongPress(targetEl) {
+  if (Date.now() >= _suppressClickUntil) return false;
+  if (!_suppressTarget || !targetEl) return Date.now() < _suppressClickUntil;
+  return _suppressTarget === targetEl || _suppressTarget.contains(targetEl) || targetEl.contains(_suppressTarget);
+}
+
+function _onScrollOrMove() { hideContextMenu(); }
+
+// ── Public: show menu at coords with arbitrary actions ──
+export function showContextMenu(x, y, actions, opts = {}) {
+  hideContextMenu();
+  if (!actions || !actions.length) return;
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  if (opts.title) {
+    const h = document.createElement('div');
+    h.className = 'ctx-menu-title';
+    h.textContent = opts.title;
+    menu.appendChild(h);
+  }
+  actions.forEach(a => {
+    if (a.divider) {
+      const d = document.createElement('div');
+      d.className = 'ctx-menu-divider';
+      menu.appendChild(d);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ctx-menu-item' + (a.danger ? ' ctx-menu-danger' : '') + (a.disabled ? ' ctx-menu-disabled' : '');
+    btn.disabled = !!a.disabled;
+    btn.innerHTML = `<span class="ctx-menu-icon">${a.icon || ''}</span><span class="ctx-menu-label">${esc(a.label || '')}</span>`;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideContextMenu();
+      try { a.onClick && a.onClick(); } catch (err) { console.error(err); showToast('Action failed'); }
+    });
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+
+  // Position with viewport clamping
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const rect = menu.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  let px = Math.min(x, vw - w - 8);
+  let py = Math.min(y, vh - h - 8);
+  if (px < 8) px = 8;
+  if (py < 8) py = 8;
+  menu.style.left = px + 'px';
+  menu.style.top = py + 'px';
+  _menuEl = menu;
+
+  _onDocClick = (e) => {
+    if (!_menuEl) return;
+    if (e.target === _menuEl || _menuEl.contains(e.target)) return;
+    hideContextMenu();
+  };
+  // Listen on capture so we close before underlying click fires
+  setTimeout(() => {
+    document.addEventListener('click', _onDocClick, true);
+    document.addEventListener('contextmenu', _onDocClick, true);
+    document.addEventListener('scroll', _onScrollOrMove, true);
+    document.addEventListener('wheel', _onScrollOrMove, true);
+    document.addEventListener('touchmove', _onScrollOrMove, { capture: true, passive: true });
+    window.addEventListener('resize', hideContextMenu);
+    document.addEventListener('keydown', _onEsc);
+  }, 0);
+}
+
+function _onEsc(e) { if (e.key === 'Escape') hideContextMenu(); }
+
+export function hideContextMenu() {
+  if (_menuEl) {
+    _menuEl.remove();
+    _menuEl = null;
+  }
+  if (_onDocClick) {
+    document.removeEventListener('click', _onDocClick, true);
+    document.removeEventListener('contextmenu', _onDocClick, true);
+    document.removeEventListener('scroll', _onScrollOrMove, true);
+    document.removeEventListener('wheel', _onScrollOrMove, true);
+    document.removeEventListener('touchmove', _onScrollOrMove, { capture: true });
+    window.removeEventListener('resize', hideContextMenu);
+    document.removeEventListener('keydown', _onEsc);
+    _onDocClick = null;
+  }
+}
+
+// ── Attach: per-container right-click + long-press ──
+//
+// opts.getItem(targetEl, event) → { item, type, context } | null
+// opts.selector — CSS selector for clickable items (default looks for data-ctx-item)
+export function attachContextMenu(rootEl, opts) {
+  if (!rootEl || rootEl.__ctxAttached) return;
+  rootEl.__ctxAttached = true;
+  const selector = opts.selector || '[data-ctx-item]';
+
+  const _resolveAndShow = (coords, targetEl, srcEvent) => {
+    if (!targetEl || !rootEl.contains(targetEl)) return;
+    const info = opts.getItem ? opts.getItem(targetEl, srcEvent) : null;
+    if (!info) return;
+    // Allow consumers to pass a custom action list directly
+    const actions = info.actions || (info.item ? buildActionsFor(info.item, info.type || 'track', info.context || {}) : null);
+    if (!actions || !actions.length) return;
+    const title = info.title || (info.item && info.item.name) || '';
+    showContextMenu(coords.x, coords.y, actions, { title });
+  };
+
+  // Desktop right-click
+  rootEl.addEventListener('contextmenu', (e) => {
+    const target = e.target.closest(selector);
+    if (!target || !rootEl.contains(target)) return;
+    // Ignore on form inputs
+    if (e.target.closest('input, textarea, select, button[data-ctx-skip]')) return;
+    e.preventDefault();
+    _resolveAndShow({ x: e.clientX, y: e.clientY }, target, e);
+  });
+
+  // Touch long-press
+  let pressTimer = null;
+  let pressTarget = null;
+  let startX = 0, startY = 0;
+  let moved = false;
+
+  rootEl.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    const target = e.target.closest(selector);
+    if (!target || !rootEl.contains(target)) return;
+    // Skip on form inputs, drag handles, and explicit buttons (so checkboxes, removes, action buttons keep working)
+    if (e.target.closest('input, textarea, select, button, .qi-drag, [data-ctx-skip]')) return;
+    pressTarget = target;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    moved = false;
+    const capturedTarget = target;
+    pressTimer = setTimeout(() => {
+      // Re-validate: element may have been re-rendered (innerHTML replaced)
+      if (!moved && capturedTarget && rootEl.contains(capturedTarget)) {
+        try { navigator.vibrate && navigator.vibrate(15); } catch {}
+        _suppressClickUntil = Date.now() + SUPPRESS_MS;
+        _suppressTarget = capturedTarget;
+        _resolveAndShow({ x: startX, y: startY }, capturedTarget, null);
+      }
+      pressTimer = null;
+      pressTarget = null;
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+
+  rootEl.addEventListener('touchmove', (e) => {
+    if (!pressTimer) return;
+    const t = e.touches[0];
+    if (Math.hypot(t.clientX - startX, t.clientY - startY) > MOVE_THRESHOLD) {
+      moved = true;
+      clearTimeout(pressTimer);
+      pressTimer = null;
+      pressTarget = null;
+    }
+  }, { passive: true });
+
+  const _cancel = () => {
+    if (pressTimer) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+      // Press released before timer fired → no long-press, no suppression
+      _suppressClickUntil = 0;
+      _suppressTarget = null;
+    }
+    pressTarget = null;
+  };
+  rootEl.addEventListener('touchend', _cancel, { passive: true });
+  rootEl.addEventListener('touchcancel', _cancel, { passive: true });
+}
+
+// ── Standard action set per item-type ──
+//
+// item: object with at least {name, artist, type?, id?, album?}
+// type: 'track' | 'album' | 'artist' | 'playlist' | 'show' | 'episode' | 'queue-track' | 'recommendation'
+// context: { queueIndex?, recIndex?, inLibrary?, playlistId?, ... }
+export function buildActionsFor(item, type, context = {}) {
+  const actions = [];
+  const it = item || {};
+
+  // ── Track-like items (track, queue-track, recommendation, episode) ──
+  const isTracklike = (type === 'track' || type === 'queue-track' || type === 'recommendation' || type === 'episode' || it.type === 'track');
+
+  if (type === 'queue-track') {
+    actions.push({
+      label: 'Play now', icon: '&#9654;',
+      onClick: () => _playQueueIndex(context.queueIndex),
+    });
+    actions.push({
+      label: 'Play next', icon: '&#8595;',
+      onClick: () => _moveQueueAfterCurrent(context.queueIndex),
+    });
+    actions.push({ divider: true });
+  } else if (type === 'recommendation') {
+    actions.push({
+      label: 'Play', icon: '&#9654;',
+      onClick: () => import('./recommendations.js').then(m => m.playRecIndex && m.playRecIndex(context.recIndex)),
+    });
+    actions.push({
+      label: 'Add to queue', icon: '+',
+      onClick: () => _addToQueue([it]),
+    });
+    actions.push({
+      label: 'Play next', icon: '&#8595;',
+      onClick: () => _playNext(it),
+    });
+    actions.push({ divider: true });
+  } else if (isTracklike) {
+    actions.push({
+      label: 'Play', icon: '&#9654;',
+      onClick: () => _playNow(it),
+    });
+    actions.push({
+      label: 'Play next', icon: '&#8595;',
+      onClick: () => _playNext(it),
+    });
+    actions.push({
+      label: 'Add to queue', icon: '+',
+      onClick: () => _addToQueue([it]),
+    });
+    actions.push({ divider: true });
+  } else if (type === 'album') {
+    actions.push({
+      label: 'Open album', icon: '&#128194;',
+      onClick: () => openModal(it),
+    });
+    actions.push({
+      label: 'Add all to queue', icon: '+',
+      onClick: () => _addAlbumToQueue(it),
+    });
+    actions.push({ divider: true });
+  } else if (type === 'artist') {
+    actions.push({
+      label: 'Open artist', icon: '&#128100;',
+      onClick: () => _openArtist(it),
+    });
+    actions.push({
+      label: 'Play radio', icon: '&#128251;',
+      onClick: () => _playArtistRadio(it),
+    });
+    if (context.isFavorite) {
+      actions.push({ divider: true });
+      actions.push({
+        label: 'Unfollow', icon: '&#x2661;', danger: true,
+        onClick: () => import('./favorites.js').then(m => m.toggleFavoriteArtist(it).then(() => import('./favorites.js').then(f => f.loadFavorites && f.loadFavorites()))),
+      });
+    } else if (context.canFollow) {
+      actions.push({
+        label: 'Follow', icon: '&#x2665;',
+        onClick: () => import('./favorites.js').then(m => m.toggleFavoriteArtist(it)),
+      });
+    }
+    actions.push({ divider: true });
+  } else if (type === 'playlist' || type === 'show') {
+    actions.push({
+      label: 'Open', icon: '&#128194;',
+      onClick: () => _openItem(it),
+    });
+    actions.push({ divider: true });
+  }
+
+  // ── Add to Navidrome playlist (track-like) ──
+  if (isTracklike) {
+    actions.push({
+      label: 'Add to playlist…', icon: '&#9776;',
+      onClick: () => _addToNavidromePlaylist(it),
+    });
+  }
+
+  // ── Download (track / album / episode) ──
+  if (isTracklike || type === 'album') {
+    const dl = {
+      label: 'Download', icon: '&#11015;',
+      onClick: () => openModal(it),
+    };
+    if (context.inLibrary || it.inLibrary) {
+      dl.label = 'Already in library';
+      dl.disabled = true;
+    }
+    actions.push(dl);
+  }
+
+  // ── Show artist/album from a track ──
+  if (isTracklike) {
+    if (it.artist) {
+      actions.push({
+        label: 'Show artist', icon: '&#128100;',
+        onClick: () => _searchFor('artist', it.artist),
+      });
+    }
+    if (it.album) {
+      actions.push({
+        label: 'Show album', icon: '&#128189;',
+        onClick: () => _searchFor('album', it.album),
+      });
+    }
+  }
+
+  // ── Copy info ──
+  if (it.name) {
+    actions.push({ divider: true });
+    actions.push({
+      label: 'Copy "Artist - Title"', icon: '&#128203;',
+      onClick: () => _copyInfo(it),
+    });
+  }
+
+  // ── Destructive: remove / dismiss ──
+  if (type === 'queue-track' && typeof context.queueIndex === 'number') {
+    actions.push({ divider: true });
+    actions.push({
+      label: 'Remove from queue', icon: '&times;', danger: true,
+      onClick: () => _removeFromQueue(context.queueIndex),
+    });
+  }
+  if (type === 'recommendation' && typeof context.recIndex === 'number') {
+    actions.push({ divider: true });
+    actions.push({
+      label: 'Dismiss', icon: '&times;', danger: true,
+      onClick: () => import('./recommendations.js').then(m => m.dismissRec && m.dismissRec(context.recIndex)),
+    });
+  }
+
+  return actions;
+}
+
+// ── Action implementations ────────────────────────────────────────
+function _addToQueue(items) {
+  import('./player.js').then(m => {
+    m.addToQueue(items);
+    showToast(`Added ${items.length} to queue`);
+  });
+}
+
+function _playNow(item) {
+  import('./player.js').then(m => m.addToQueue([item], true));
+}
+
+function _playNext(item) {
+  // Insert at current index + 1
+  const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
+  store.playerQueue.splice(idx, 0, item);
+  import('./queue.js').then(m => m.renderQueue());
+  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+  showToast('Will play next');
+}
+
+function _playQueueIndex(idx) {
+  if (typeof idx !== 'number' || idx < 0 || idx >= store.playerQueue.length) return;
+  store.playerIndex = idx;
+  import('./player.js').then(m => m.loadAndPlay && m.loadAndPlay());
+}
+
+function _moveQueueAfterCurrent(idx) {
+  if (typeof idx !== 'number' || idx < 0 || idx >= store.playerQueue.length) return;
+  const [item] = store.playerQueue.splice(idx, 1);
+  let dest = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
+  if (idx < store.playerIndex) {
+    store.playerIndex--;
+    dest = store.playerIndex + 1;
+  }
+  store.playerQueue.splice(dest, 0, item);
+  import('./queue.js').then(m => m.renderQueue());
+  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+}
+
+function _removeFromQueue(idx) {
+  if (typeof idx !== 'number' || idx < 0 || idx >= store.playerQueue.length) return;
+  store.playerQueue.splice(idx, 1);
+  if (idx < store.playerIndex) store.playerIndex--;
+  else if (idx === store.playerIndex) {
+    if (store.playerIndex >= store.playerQueue.length) store.playerIndex = store.playerQueue.length - 1;
+    if (store.playerIndex >= 0) import('./player.js').then(m => m.loadAndPlay && m.loadAndPlay());
+  }
+  import('./queue.js').then(m => m.renderQueue());
+  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+}
+
+async function _addAlbumToQueue(album) {
+  try {
+    showToast('Loading album…');
+    const data = await apiJson(`/api/spotify/album/${encodeURIComponent(album.id || '')}/tracks`);
+    const tracks = (data.tracks || []).map(t => ({ ...t, album: album.name, image: t.image || album.image }));
+    if (!tracks.length) { showToast('No tracks found'); return; }
+    _addToQueue(tracks);
+  } catch (e) {
+    showToast(e.message || 'Failed to load album');
+  }
+}
+
+async function _addToNavidromePlaylist(item) {
+  try {
+    const data = await apiJson('/api/library/playlists');
+    const playlists = data.playlists || [];
+    if (!playlists.length) { showToast('No Navidrome playlists'); return; }
+    const picked = await showPlaylistPicker(playlists);
+    if (!picked || !picked.length) return;
+    for (const pl of picked) {
+      await apiJson(`/api/library/playlist/${pl.id}/add-and-download`, {
+        method: 'POST',
+        body: { name: item.name, artist: item.artist || '', album: item.album || '' },
+      });
+    }
+    showToast(`Added to ${picked.map(p => p.name).join(', ')}`);
+  } catch (e) {
+    showToast(e.message || 'Failed to add to playlist');
+  }
+}
+
+function _searchFor(searchType, q) {
+  const input = $('#searchInput');
+  if (!input) return;
+  input.value = q;
+  store.searchType = searchType;
+  document.querySelectorAll('.type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === searchType));
+  // Navigate to search page
+  import('./router.js').then(m => m.goPage && m.goPage('search'));
+  import('./search.js').then(m => m.doSearch && m.doSearch());
+}
+
+function _openArtist(item) {
+  if (item.id) {
+    import('./spotify.js').then(m => m.loadArtistDetail && m.loadArtistDetail(item.id, 'search'));
+  } else if (item.name) {
+    _searchFor('artist', item.name);
+  }
+}
+
+function _openItem(item) {
+  if (item.type === 'playlist' && item.id) {
+    import('./spotify.js').then(m => m.loadPlaylistDetail && m.loadPlaylistDetail(item.id, item.url, 'search'));
+  } else if (item.type === 'show' && item.id) {
+    import('./spotify.js').then(m => m.loadShowDetail && m.loadShowDetail(item.id, item.url, 'search', item.feed_url));
+  } else {
+    openModal(item);
+  }
+}
+
+async function _playArtistRadio(item) {
+  try {
+    const params = new URLSearchParams({
+      artist: item.name || item.artist || '',
+      artist_id: item.id || '',
+      limit: '25',
+    });
+    const data = await apiJson(`/api/radio?${params}`);
+    const tracks = data.tracks || [];
+    if (!tracks.length) { showToast('No radio tracks'); return; }
+    store.radioMode = true;
+    store.radioSeedTrack = tracks[0];
+    _addToQueue(tracks);
+  } catch (e) {
+    showToast(e.message || 'Radio failed');
+  }
+}
+
+function _copyInfo(item) {
+  const text = `${item.artist || ''} - ${item.name || ''}`.trim();
+  try {
+    navigator.clipboard.writeText(text).then(() => showToast('Copied'));
+  } catch {
+    showToast('Copy failed');
+  }
+}
+
+export function init() {
+  // No global init needed — modules call attachContextMenu after rendering.
+}

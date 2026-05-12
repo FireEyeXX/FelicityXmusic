@@ -3,6 +3,7 @@
 import { store } from './store.js';
 import { $, $$, esc, historyBack, showToast } from './utils.js';
 import { getCachedBpm } from './bpm.js';
+import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // Forward references set during init to avoid circular imports
 let loadAndPlay, hidePlayerBar, saveQueueDebounced;
@@ -85,10 +86,20 @@ export function renderQueueInto(el) {
   _loadMissingBpm(el);
   $$('.queue-item', el).forEach(qi => {
     qi.addEventListener('click', (e) => {
-      if (e.target.closest('.qi-remove')) return;
+      if (wasLongPress()) return;
+      if (e.target.closest('.qi-remove') || e.target.closest('.qi-drag')) return;
       const idx = parseInt(qi.dataset.qi);
       if (idx !== store.playerIndex) { store.playerIndex = idx; loadAndPlay(); }
     });
+  });
+  attachContextMenu(el, {
+    selector: '.queue-item',
+    getItem: (targetEl) => {
+      const idx = parseInt(targetEl.dataset.qi);
+      const item = store.playerQueue[idx];
+      if (!item) return null;
+      return { item, type: 'queue-track', context: { queueIndex: idx } };
+    },
   });
   $$('.qi-remove', el).forEach(btn => {
     btn.addEventListener('click', (e) => {
