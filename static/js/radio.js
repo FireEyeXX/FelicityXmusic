@@ -5,6 +5,7 @@ import { $, showToast } from './utils.js';
 import { apiJson } from './api.js';
 import { loadAndPlay } from './player.js';
 import { toggleFavoriteArtist } from './favorites.js';
+import { playRadio } from './upnext.js';
 
 // ── Start Radio ──
 export async function startRadio(item) {
@@ -18,12 +19,11 @@ export async function startRadio(item) {
     const data = await apiJson(`/api/radio?${params}`);
     const tracks = data.tracks || [];
     if (!tracks.length) { showToast('No radio tracks found'); return; }
-    store.playerQueue = tracks;
-    store.playerIndex = 0;
     store.radioMode = true;
     store.radioSeedTrack = item;
     store.radioLoading = false;
-    loadAndPlay();
+    // Switches active playlist context to Radio temp playlist + plays
+    await playRadio(tracks);
     showToast(`Playing radio based on ${item.artist || item.name}`);
   } catch (e) {
     showToast('Radio failed: ' + e.message);

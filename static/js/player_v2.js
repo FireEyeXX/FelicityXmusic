@@ -314,20 +314,17 @@ export function addToQueue(items, playNow = false) {
   renderQueue();
   saveQueueDebounced();
   showToast(`Added ${items.length} track${items.length > 1 ? 's' : ''} to queue`);
-  // Playlist mode: add tracks to Navidrome playlist in background
+  // Playlist mode: add tracks to Navidrome playlist (one batch call)
   if (store.playlistMode) {
-    for (const item of items) {
-      apiJson(`/api/library/playlist/${store.playlistMode.id}/add-and-download`, {
-        method: 'POST',
-        body: { name: item.name || '', artist: item.artist || '', album: item.album || '' },
-      }).then(data => {
-        if (data.status === 'downloading') {
-          showToast(`Downloading & adding to ${store.playlistMode.name}...`);
-        } else if (data.status === 'added') {
-          showToast(`Added to ${store.playlistMode.name}`);
-        }
-      }).catch(() => {});
-    }
+    apiJson(`/api/library/playlist/${store.playlistMode.id}/add-and-download-batch`, {
+      method: 'POST',
+      body: { tracks: items.map(it => ({ name: it.name || '', artist: it.artist || '', album: it.album || '' })) },
+    }).then(data => {
+      const parts = [];
+      if (data.added) parts.push(`${data.added} added`);
+      if (data.queued) parts.push(`${data.queued} downloading`);
+      if (parts.length) showToast(`${parts.join(', ')} → ${store.playlistMode.name}`);
+    }).catch(() => {});
   }
 }
 
@@ -616,6 +613,7 @@ function _nextTrackInQueue() {
           loadAndPlay();
           renderQueue();
           saveQueueDebounced();
+          import('./upnext.js').then(u => u.mirrorAdd(newTracks));
         } else {
           showToast('No more similar tracks found');
           _activeDeckEl().pause();

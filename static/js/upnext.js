@@ -7,14 +7,20 @@ import { apiJson } from './api.js';
 import { showToast } from './utils.js';
 
 const UPNEXT_DISPLAY = 'Up Next';
+const RADIO_DISPLAY = 'Radio';
 
 function _isUpnextRaw(name) {
   return typeof name === 'string' && name.startsWith('__upnext_');
 }
+function _isRadioRaw(name) {
+  return typeof name === 'string' && name.startsWith('__radio_');
+}
 
 // Friendly display name: hide internal prefix from the UI.
 export function displayPlaylistName(rawName) {
-  return _isUpnextRaw(rawName) ? UPNEXT_DISPLAY : (rawName || '');
+  if (_isUpnextRaw(rawName)) return UPNEXT_DISPLAY;
+  if (_isRadioRaw(rawName)) return RADIO_DISPLAY;
+  return rawName || '';
 }
 
 // Initialize on boot: idempotently fetch/create Up Next, set as playlistMode
@@ -66,27 +72,67 @@ export function activePlaylistId() {
 
 // Returns true when the active playlist is Up Next (the temp one).
 export function isUpNextActive() {
-  // We display "Up Next"; the raw name starts with __upnext_. Easiest check:
-  // compare to display constant.
   return !!(store.playlistMode && store.playlistMode.name === UPNEXT_DISPLAY);
 }
 
-// Replace local playback queue AND mirror to Up Next playlist on Navidrome.
-// Mirror is fire-and-forget so playback starts immediately; failures are logged
-// but don't block. Only mirrors when Up Next is the active playlist (avoid
-// clobbering a named playlist the user already opened).
+// Returns true when the active playlist is the Radio temp playlist.
+export function isRadioActive() {
+  return !!(store.playlistMode && store.playlistMode.name === RADIO_DISPLAY);
+}
+
+// Returns true when active playlist is any of our internal temp playlists.
+export function isTempActive() {
+  return isUpNextActive() || isRadioActive();
+}
+
+// Replace local playback queue AND mirror to the active temp playlist on
+// Navidrome (Up Next OR Radio). Named playlists are never auto-replaced.
 export async function playTracks(tracks) {
   if (!tracks || !tracks.length) return;
-  // Local playback first — instant
   store.playerQueue = tracks;
   store.playerIndex = 0;
   const playerMod = await import('./player.js');
   playerMod.loadAndPlay();
-  // Mirror in background when Up Next is the current target
   const id = activePlaylistId();
-  if (id && isUpNextActive()) {
-    replaceByName(id, tracks).catch(e => console.warn('Up Next mirror failed:', e));
+  if (id && isTempActive()) {
+    replaceByName(id, tracks).catch(e => console.warn('Mirror failed:', e));
   }
+}
+
+// Switch playback context to the Radio temp playlist, replace its contents,
+// and start playing. The Up Next temp playlist is left untouched so the user
+// can return to their previous queue when radio mode ends.
+export async function playRadio(tracks) {
+  if (!tracks || !tracks.length) return;
+  try {
+    const rpl = await apiJson('/api/library/radio');
+    if (rpl && rpl.id) {
+      store.playlistMode = { id: rpl.id, name: RADIO_DISPLAY };
+      const badge = document.getElementById('fpPlaylistBadge');
+      if (badge) { badge.textContent = RADIO_DISPLAY; badge.style.display = ''; }
+    }
+  } catch {}
+  store.playerQueue = tracks;
+  store.playerIndex = 0;
+  const playerMod = await import('./player.js');
+  playerMod.loadAndPlay();
+  const id = activePlaylistId();
+  if (id && isRadioActive()) {
+    replaceByName(id, tracks).catch(e => console.warn('Radio mirror failed:', e));
+  }
+}
+
+// Append-only mirror: fire-and-forget batch add to the active temp playlist
+// after the caller has appended tracks to store.playerQueue locally. Useful
+// for auto-radio fills and similar incremental appends.
+export function mirrorAdd(tracks) {
+  if (!tracks || !tracks.length) return;
+  const id = activePlaylistId();
+  if (!id || !isTempActive()) return;
+  apiJson(`/api/library/playlist/${id}/add-and-download-batch`, {
+    method: 'POST',
+    body: { tracks: tracks.map(t => ({ name: t.name || '', artist: t.artist || '', album: t.album || '' })) },
+  }).catch(() => {});
 }
 
 // Clear the local playback queue. If Up Next is the active context, also clear

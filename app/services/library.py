@@ -348,14 +348,24 @@ def _cover_params() -> str:
 
 
 UPNEXT_PREFIX = "__upnext_"
+RADIO_PREFIX = "__radio_"
+TEMP_PREFIXES = (UPNEXT_PREFIX, RADIO_PREFIX)
 
 
 def upnext_name(username: str, device_id: str) -> str:
     return f"{UPNEXT_PREFIX}{username}_{device_id}"
 
 
+def radio_name(username: str, device_id: str) -> str:
+    return f"{RADIO_PREFIX}{username}_{device_id}"
+
+
 def is_upnext_name(name: str) -> bool:
     return (name or "").startswith(UPNEXT_PREFIX)
+
+
+def is_temp_playlist_name(name: str) -> bool:
+    return any((name or "").startswith(p) for p in TEMP_PREFIXES)
 
 
 async def create_playlist_and_get_id(name: str) -> str | None:
@@ -371,19 +381,26 @@ async def create_playlist_and_get_id(name: str) -> str | None:
         return sr.get("playlist", {}).get("id")
 
 
-async def get_or_create_upnext(username: str, device_id: str) -> dict | None:
-    """Idempotently return the Up Next temp playlist for a (user, device)."""
-    target = upnext_name(username, device_id)
+async def get_or_create_temp_playlist(target_name: str) -> dict | None:
+    """Idempotently return a temp playlist by exact name."""
     playlists = await get_playlists()
     for p in playlists:
-        if p.get("name") == target:
+        if p.get("name") == target_name:
             full = await get_playlist(p["id"])
             return full or p
-    new_id = await create_playlist_and_get_id(target)
+    new_id = await create_playlist_and_get_id(target_name)
     if not new_id:
         return None
     full = await get_playlist(new_id)
-    return full or {"id": new_id, "name": target, "tracks": [], "songCount": 0}
+    return full or {"id": new_id, "name": target_name, "tracks": [], "songCount": 0}
+
+
+async def get_or_create_upnext(username: str, device_id: str) -> dict | None:
+    return await get_or_create_temp_playlist(upnext_name(username, device_id))
+
+
+async def get_or_create_radio(username: str, device_id: str) -> dict | None:
+    return await get_or_create_temp_playlist(radio_name(username, device_id))
 
 
 async def replace_playlist_by_names(playlist_id: str, tracks: list[dict]) -> dict:

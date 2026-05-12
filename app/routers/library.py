@@ -15,6 +15,10 @@ class ReplaceByNameRequest(BaseModel):
     tracks: list[dict]
 
 
+class BatchAddRequest(BaseModel):
+    tracks: list[dict]
+
+
 router = APIRouter(prefix="/api/library", tags=["library"])
 
 
@@ -29,8 +33,8 @@ async def get_cover_art(cover_id: str):
 @router.get("/playlists")
 async def get_playlists(user: dict = Depends(auth.get_current_user)):
     playlists = await library.get_playlists()
-    # Hide internal Up Next temp playlists from the library UI
-    playlists = [p for p in playlists if not library.is_upnext_name(p.get("name", ""))]
+    # Hide internal temp playlists (Up Next + Radio) from the library UI
+    playlists = [p for p in playlists if not library.is_temp_playlist_name(p.get("name", ""))]
     return {"playlists": playlists}
 
 
@@ -39,6 +43,16 @@ async def get_upnext(request: Request, user: dict = Depends(auth.get_current_use
     """Idempotently fetch (or create) the Up Next temp playlist for this user+device."""
     device_id = _get_device_id(request)
     pl = await library.get_or_create_upnext(user["username"], device_id)
+    if not pl:
+        raise HTTPException(503, "Navidrome unavailable")
+    return pl
+
+
+@router.get("/radio")
+async def get_radio_playlist(request: Request, user: dict = Depends(auth.get_current_user)):
+    """Idempotently fetch (or create) the Radio temp playlist for this user+device."""
+    device_id = _get_device_id(request)
+    pl = await library.get_or_create_radio(user["username"], device_id)
     if not pl:
         raise HTTPException(503, "Navidrome unavailable")
     return pl
@@ -143,6 +157,54 @@ async def add_and_download(playlist_id: str, req: AddTrackByNameRequest, user: d
     )
     asyncio.create_task(downloader.run_download(job))
     return {"status": "downloading", "job_id": job.id}
+
+
+@router.post("/playlist/{playlist_id}/add-and-download-batch")
+async def add_and_download_batch(playlist_id: str, req: BatchAddRequest, user: dict = Depends(auth.get_current_user)):
+    """Add a batch of tracks to a playlist in one call.
+
+    Resolves Navidrome song IDs in parallel; adds matched IDs in batches;
+    creates a download job per missing track (with playlist_id callback so the
+    track lands in the playlist after the download completes).
+    """
+    tracks = req.tracks or []
+    if not tracks:
+        return {"added": 0, "queued": 0, "missing": []}
+
+    sem = asyncio.Semaphore(6)
+
+    async def _resolve(t: dict):
+        async with sem:
+            sid = await library.find_song_id(t.get("name", ""), t.get("artist", ""), t.get("album", ""))
+            return (t, sid)
+
+    pairs = await asyncio.gather(*[_resolve(t) for t in tracks])
+    song_ids = [sid for _, sid in pairs if sid]
+    missing = [t for t, sid in pairs if not sid]
+
+    added = 0
+    if song_ids:
+        ok = await library.update_playlist(playlist_id, song_ids_to_add=song_ids)
+        if ok:
+            added = len(song_ids)
+
+    queued = 0
+    if missing:
+        from app.services import settings as app_settings
+        fmt = app_settings._settings.get("default_format", "flac")
+        method = app_settings._settings.get("default_method", "yt-dlp")
+        for t in missing:
+            title = f"{t.get('artist','')} - {t.get('name','')}".strip(" -")
+            job = create_job(
+                type_="track", title=title, url="", method=method, fmt=fmt,
+                playlist_id=playlist_id,
+                playlist_tracks=[{"name": t.get("name", ""), "artist": t.get("artist", ""), "album": t.get("album", "")}],
+                username=user["username"],
+            )
+            asyncio.create_task(downloader.run_download(job))
+            queued += 1
+
+    return {"added": added, "queued": queued, "missing": missing}
 
 
 @router.post("/track/delete")
