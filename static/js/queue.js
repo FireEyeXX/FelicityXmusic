@@ -128,7 +128,13 @@ export function renderQueueInto(el) {
 
 export function updateSaveButton() {
   const btn = $('#fpSaveQueue');
-  if (btn) btn.style.display = (!store.playlistMode && store.playerQueue.length > 0) ? '' : 'none';
+  if (!btn) return;
+  // Show the "Save as playlist" button whenever the active context is the
+  // ephemeral Up Next AND there is something to save.
+  const isUpNext = !!(store.playlistMode && store.playlistMode.name === 'Up Next');
+  const show = (isUpNext || !store.playlistMode) && store.playerQueue.length > 0;
+  btn.style.display = show ? '' : 'none';
+  btn.textContent = 'Save as playlist';
 }
 
 export function renderQueue() {
@@ -260,43 +266,61 @@ export function init() {
   $('#playerQueueBtn').addEventListener('click', () => {
     store.queuePanelOpen ? closeQueuePanel() : openQueuePanel();
   });
-  // Save queue as Navidrome playlist
+  // Save: promote current Up Next to a named playlist, then spawn a fresh Up Next.
   $('#fpSaveQueue').addEventListener('click', async () => {
-    if (!store.playerQueue.length) return;
-    const name = prompt('Save queue as playlist:');
+    if (!store.playerQueue.length || !store.playlistMode) return;
+    const name = prompt('Save as playlist:');
     if (!name || !name.trim()) return;
     const btn = $('#fpSaveQueue');
     btn.disabled = true;
     btn.textContent = 'Saving...';
     try {
       const { apiJson } = await import('./api.js');
-      // Create playlist
-      await apiJson('/api/library/playlist', { method: 'POST', body: { name: name.trim() } });
-      // Get new playlist ID
-      const data = await apiJson('/api/library/playlists');
-      const pl = (data.playlists || []).find(p => p.name === name.trim());
-      if (!pl) throw new Error('Playlist not created');
-      // Add all tracks by name
-      let added = 0;
-      for (const track of store.playerQueue) {
-        try {
-          await apiJson(`/api/library/playlist/${pl.id}/add-by-name`, {
-            method: 'POST',
-            body: { name: track.name || '', artist: track.artist || '', album: track.album || '' },
-          });
-          added++;
-        } catch {}
+      const isUpNext = store.playlistMode.name === 'Up Next';
+      if (isUpNext) {
+        // Rename Up Next → user's chosen name. The Navidrome playlist sheds the
+        // __upnext_ prefix, becoming a regular library entry. Tracks unchanged.
+        await apiJson(`/api/library/playlist/${store.playlistMode.id}/rename`, {
+          method: 'PUT', body: { name: name.trim() },
+        });
+        store.playlistMode = { id: store.playlistMode.id, name: name.trim() };
+        // Spawn a fresh Up Next for the next round of ad-hoc playback.
+        const u = await import('./upnext.js');
+        // Don't override playlistMode (now points to the named playlist),
+        // but ensure a new Up Next exists for later use.
+        const prev = store.playlistMode;
+        store.playlistMode = null;
+        await u.initUpNext();
+        store.playlistMode = prev;
+        showToast(`Saved as "${name.trim()}"`);
+      } else {
+        // Already in a named playlist — fall back to the legacy create-and-copy.
+        await apiJson('/api/library/playlist', { method: 'POST', body: { name: name.trim() } });
+        const data = await apiJson('/api/library/playlists');
+        const pl = (data.playlists || []).find(p => p.name === name.trim());
+        if (!pl) throw new Error('Playlist not created');
+        let added = 0;
+        for (const track of store.playerQueue) {
+          try {
+            await apiJson(`/api/library/playlist/${pl.id}/add-by-name`, {
+              method: 'POST',
+              body: { name: track.name || '', artist: track.artist || '', album: track.album || '' },
+            });
+            added++;
+          } catch {}
+        }
+        showToast(`Saved "${name.trim()}" (${added}/${store.playerQueue.length} tracks)`);
+        store.playlistMode = { id: pl.id, name: name.trim() };
       }
-      showToast(`Saved "${name.trim()}" (${added}/${store.playerQueue.length} tracks)`);
-      // Activate playlist mode
-      store.playlistMode = { id: pl.id, name: name.trim() };
       import('./player.js').then(m => m.updatePlaylistBadge());
+      const badge = $('#fpPlaylistBadge');
+      if (badge && store.playlistMode) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
       updateSaveButton();
     } catch (e) {
       showToast('Failed to save: ' + (e.message || ''));
     } finally {
       btn.disabled = false;
-      btn.textContent = 'Save';
+      btn.textContent = 'Save as playlist';
     }
   });
 
