@@ -324,30 +324,32 @@ export function init() {
     }
   });
 
-  // Click playlist badge to deactivate playlist mode
+  // Click playlist badge: if a named playlist is active, switch back to Up Next;
+  // otherwise (already in Up Next) it's a no-op. We never leave the unified model.
   const plBadge = $('#fpPlaylistBadge');
-  if (plBadge) plBadge.addEventListener('click', () => {
+  if (plBadge) plBadge.addEventListener('click', async () => {
+    if (!store.playlistMode) return;
+    if (store.playlistMode.name === 'Up Next') return;
+    const u = await import('./upnext.js');
     store.playlistMode = null;
-    plBadge.style.display = 'none';
-    import('./utils.js').then(m => m.showToast('Playlist mode deactivated'));
+    await u.initUpNext();
+    showToast('Switched to Up Next');
   });
   $('#queuePanelClose').addEventListener('click', () => closeQueuePanel());
-  $('#clearQueue').addEventListener('click', () => {
+  $('#clearQueue').addEventListener('click', async () => {
     audio().pause();
-    store.playerQueue = [];
-    store.playerIndex = -1;
-    store.playlistMode = null;
+    const u = await import('./upnext.js');
+    await u.clearActiveQueue();
     hidePlayerBar();
     renderQueue();
     closeQueuePanel();
     saveQueueDebounced();
   });
   $('#fpQueuePanelClose').addEventListener('click', () => closeFpQueuePanel());
-  $('#fpQueueClear').addEventListener('click', () => {
+  $('#fpQueueClear').addEventListener('click', async () => {
     audio().pause();
-    store.playerQueue = [];
-    store.playerIndex = -1;
-    store.playlistMode = null;
+    const u = await import('./upnext.js');
+    await u.clearActiveQueue();
     hidePlayerBar();
     renderQueue();
     closeFpQueuePanel();

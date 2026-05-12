@@ -105,10 +105,10 @@ export function init() {
   });
 
   // Desktop inline queue clear button
-  $('#fpClearQueue').addEventListener('click', () => {
+  $('#fpClearQueue').addEventListener('click', async () => {
     audio().pause();
-    store.playerQueue = [];
-    store.playerIndex = -1;
+    const u = await import('./upnext.js');
+    await u.clearActiveQueue();
     hidePlayerBar();
     renderQueue();
     closeFullPlayer();

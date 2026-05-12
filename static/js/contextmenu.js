@@ -255,6 +255,10 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => openModal(it),
     });
     actions.push({
+      label: 'Play all (replace Up Next)', icon: '&#9654;',
+      onClick: () => _playAlbumReplace(it),
+    });
+    actions.push({
       label: 'Add all to queue', icon: '+',
       onClick: () => _addAlbumToQueue(it),
     });
@@ -406,13 +410,29 @@ function _removeFromQueue(idx) {
   import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
 }
 
+async function _fetchAlbumTracks(album) {
+  const data = await apiJson(`/api/spotify/album/${encodeURIComponent(album.id || '')}/tracks`);
+  return (data.tracks || []).map(t => ({ ...t, album: album.name, image: t.image || album.image }));
+}
+
 async function _addAlbumToQueue(album) {
   try {
     showToast('Loading album…');
-    const data = await apiJson(`/api/spotify/album/${encodeURIComponent(album.id || '')}/tracks`);
-    const tracks = (data.tracks || []).map(t => ({ ...t, album: album.name, image: t.image || album.image }));
+    const tracks = await _fetchAlbumTracks(album);
     if (!tracks.length) { showToast('No tracks found'); return; }
     _addToQueue(tracks);
+  } catch (e) {
+    showToast(e.message || 'Failed to load album');
+  }
+}
+
+async function _playAlbumReplace(album) {
+  try {
+    showToast('Loading album…');
+    const tracks = await _fetchAlbumTracks(album);
+    if (!tracks.length) { showToast('No tracks found'); return; }
+    const u = await import('./upnext.js');
+    u.playTracks(tracks);
   } catch (e) {
     showToast(e.message || 'Failed to load album');
   }

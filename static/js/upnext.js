@@ -89,4 +89,19 @@ export async function playTracks(tracks) {
   }
 }
 
+// Clear the local playback queue. If Up Next is the active context, also clear
+// its Navidrome contents (so the mirror stays in sync). Named playlists are
+// never destructively cleared — we just switch back to a fresh Up Next.
+export async function clearActiveQueue() {
+  store.playerQueue = [];
+  store.playerIndex = -1;
+  if (isUpNextActive() && activePlaylistId()) {
+    replaceByName(activePlaylistId(), []).catch(() => {});
+  } else {
+    // Named playlist active — leave its contents alone, just go back to Up Next
+    store.playlistMode = null;
+    await initUpNext().catch(() => {});
+  }
+}
+
 export { UPNEXT_DISPLAY };
