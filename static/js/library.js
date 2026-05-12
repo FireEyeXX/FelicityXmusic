@@ -261,13 +261,14 @@ async function _deleteTrackFromLibrary(item) {
 
 // ── Fix #3: Multi-select (shift/cmd-click) on playlist detail tracks ──
 function _addSelectListeners() {
-  _selectSet.clear();
-  _lastSelectIdx = -1;
+  // _selectSet and _lastSelectIdx already reset by _addBulkCheckboxes()
   $$('#libraryTracks .card').forEach((card, i) => {
     // Use capture=true so this fires BEFORE the card's bubble-phase click
     // handler (added by renderResults) — modifier clicks are intercepted here
     // and stopImmediatePropagation prevents the modal from opening.
     card.addEventListener('click', (e) => {
+      // Checkbox clicks are handled by their own change handler — don't interfere
+      if (e.target.classList.contains('lib-bulk-cb')) return;
       if (e.shiftKey || e.metaKey || e.ctrlKey) {
         // Modifier click → select only, never open modal
         e.preventDefault();
@@ -302,7 +303,11 @@ function _updateSelectUI() {
     } else {
       delete card.dataset.selected;
     }
+    // Keep checkbox in sync with _selectSet
+    const cb = card.querySelector('.lib-bulk-cb');
+    if (cb) cb.checked = _selectSet.has(i);
   });
+  _updateBulkUI();
 }
 
 function _buildMultiSelectMenu(playlistId, playlistName) {
@@ -396,14 +401,15 @@ function _buildMultiSelectMenu(playlistId, playlistName) {
   };
 }
 
-// ── Bulk select (existing checkbox mode — unchanged) ──
-let _bulkSelected = new Set();
+// ── Bulk select (checkboxes — unified with _selectSet) ──
 
 function _addBulkCheckboxes() {
-  _bulkSelected.clear();
+  // _selectSet is the single source of truth; reset it on each detail load
+  _selectSet.clear();
+  _lastSelectIdx = -1;
   _updateBulkUI();
   const toggle = $('#libBulkToggle');
-  if (toggle) toggle.checked = false;
+  if (toggle) { toggle.checked = false; toggle.indeterminate = false; }
   $$('#libraryTracks .card').forEach((card, i) => {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
@@ -411,7 +417,9 @@ function _addBulkCheckboxes() {
     cb.style.cssText = 'position:absolute;top:8px;left:8px;width:18px;height:18px;accent-color:var(--accent);z-index:2;cursor:pointer;';
     cb.addEventListener('change', (e) => {
       e.stopPropagation();
-      if (cb.checked) _bulkSelected.add(i); else _bulkSelected.delete(i);
+      if (cb.checked) _selectSet.add(i); else _selectSet.delete(i);
+      _lastSelectIdx = i;
+      _updateSelectUI();
       _updateBulkUI();
     });
     cb.addEventListener('click', (e) => e.stopPropagation());
@@ -423,8 +431,23 @@ function _addBulkCheckboxes() {
 function _updateBulkUI() {
   const actions = $('#libBulkActions');
   const count = $('#libBulkCount');
-  if (actions) actions.style.display = _bulkSelected.size > 0 ? 'flex' : 'none';
-  if (count) count.textContent = `${_bulkSelected.size} selected`;
+  if (actions) actions.style.display = _selectSet.size > 0 ? 'flex' : 'none';
+  if (count) count.textContent = `${_selectSet.size} selected`;
+  // Sync master toggle indeterminate state
+  const toggle = $('#libBulkToggle');
+  if (toggle) {
+    const total = $$('#libraryTracks .card').length;
+    if (_selectSet.size === 0) {
+      toggle.checked = false;
+      toggle.indeterminate = false;
+    } else if (_selectSet.size === total) {
+      toggle.checked = true;
+      toggle.indeterminate = false;
+    } else {
+      toggle.checked = false;
+      toggle.indeterminate = true;
+    }
+  }
 }
 
 function _addRemoveButtons(playlistId) {
@@ -571,28 +594,29 @@ export function init() {
     }
   });
 
-  // Bulk: Select All
+  // Bulk: Select All / None (master toggle)
   const bulkToggle = $('#libBulkToggle');
   if (bulkToggle) bulkToggle.addEventListener('change', () => {
-    const cbs = $$('#libraryTracks .lib-bulk-cb');
-    cbs.forEach((cb, i) => {
-      cb.checked = bulkToggle.checked;
-      if (bulkToggle.checked) _bulkSelected.add(i); else _bulkSelected.delete(i);
-    });
-    _updateBulkUI();
+    const cards = $$('#libraryTracks .card');
+    if (bulkToggle.checked) {
+      cards.forEach((_, i) => _selectSet.add(i));
+    } else {
+      _selectSet.clear();
+    }
+    _updateSelectUI(); // syncs card data-selected + checkboxes + bulk bar + toggle state
   });
 
   // Bulk: Copy to playlist
   const bulkCopy = $('#libBulkCopy');
   if (bulkCopy) bulkCopy.addEventListener('click', async () => {
-    if (!_bulkSelected.size) return;
+    if (!_selectSet.size) return;
     try {
       const data = await apiJson('/api/library/playlists');
       const others = (data.playlists || []).filter(p => p.id !== currentLibPlaylistId);
       if (!others.length) { showToast('No other playlists'); return; }
       const picked = await showPlaylistPicker(others);
       if (!picked || !picked.length) return;
-      const songIds = [..._bulkSelected].map(i => currentLibPlaylistTracks[i]?.id).filter(Boolean);
+      const songIds = [..._selectSet].map(i => currentLibPlaylistTracks[i]?.id).filter(Boolean);
       for (const pl of picked) {
         await apiJson(`/api/library/playlist/${pl.id}/tracks`, {
           method: 'PUT',
@@ -608,11 +632,11 @@ export function init() {
   // Bulk: Remove from playlist
   const bulkRemove = $('#libBulkRemove');
   if (bulkRemove) bulkRemove.addEventListener('click', async () => {
-    if (!_bulkSelected.size || !currentLibPlaylistId) return;
-    if (!confirm(`Remove ${_bulkSelected.size} tracks from playlist?`)) return;
+    if (!_selectSet.size || !currentLibPlaylistId) return;
+    if (!confirm(`Remove ${_selectSet.size} tracks from playlist?`)) return;
     try {
       // Remove by indices (descending to avoid shift)
-      const indices = [..._bulkSelected].sort((a, b) => b - a);
+      const indices = [..._selectSet].sort((a, b) => b - a);
       await apiJson(`/api/library/playlist/${currentLibPlaylistId}/tracks`, {
         method: 'DELETE',
         body: { indices },
