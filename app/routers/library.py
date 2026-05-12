@@ -1,11 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import Response
+from fastapi import APIRouter, HTTPException, Depends, Request
 
 import asyncio
+
+from pydantic import BaseModel
 
 from app.models import CreatePlaylistRequest, AddTracksByIdRequest, RemoveTracksRequest, AddTrackByNameRequest, DeleteAlbumRequest
 from app.services import auth, library, downloader, player
 from app.services.jobs import create_job
+from app.dependencies import _get_device_id
+from fastapi.responses import Response
+
+
+class ReplaceByNameRequest(BaseModel):
+    tracks: list[dict]
+
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -21,7 +29,26 @@ async def get_cover_art(cover_id: str):
 @router.get("/playlists")
 async def get_playlists(user: dict = Depends(auth.get_current_user)):
     playlists = await library.get_playlists()
+    # Hide internal Up Next temp playlists from the library UI
+    playlists = [p for p in playlists if not library.is_upnext_name(p.get("name", ""))]
     return {"playlists": playlists}
+
+
+@router.get("/upnext")
+async def get_upnext(request: Request, user: dict = Depends(auth.get_current_user)):
+    """Idempotently fetch (or create) the Up Next temp playlist for this user+device."""
+    device_id = _get_device_id(request)
+    pl = await library.get_or_create_upnext(user["username"], device_id)
+    if not pl:
+        raise HTTPException(503, "Navidrome unavailable")
+    return pl
+
+
+@router.post("/playlist/{playlist_id}/replace-by-name")
+async def replace_playlist_by_name(playlist_id: str, req: ReplaceByNameRequest, user: dict = Depends(auth.get_current_user)):
+    """Atomically replace a playlist's tracks by name/artist matching."""
+    result = await library.replace_playlist_by_names(playlist_id, req.tracks)
+    return result
 
 
 @router.get("/playlist/{playlist_id}")

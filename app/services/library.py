@@ -347,6 +347,90 @@ def _cover_params() -> str:
     return urllib.parse.urlencode(_params())
 
 
+UPNEXT_PREFIX = "__upnext_"
+
+
+def upnext_name(username: str, device_id: str) -> str:
+    return f"{UPNEXT_PREFIX}{username}_{device_id}"
+
+
+def is_upnext_name(name: str) -> bool:
+    return (name or "").startswith(UPNEXT_PREFIX)
+
+
+async def create_playlist_and_get_id(name: str) -> str | None:
+    """Create an empty playlist; return the new ID, or None on failure."""
+    if not NAVIDROME_PASSWORD:
+        return None
+    async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=15) as client:
+        resp = await client.get("/rest/createPlaylist", params=_params(name=name))
+        resp.raise_for_status()
+        sr = resp.json().get("subsonic-response", {})
+        if sr.get("status") != "ok":
+            return None
+        return sr.get("playlist", {}).get("id")
+
+
+async def get_or_create_upnext(username: str, device_id: str) -> dict | None:
+    """Idempotently return the Up Next temp playlist for a (user, device)."""
+    target = upnext_name(username, device_id)
+    playlists = await get_playlists()
+    for p in playlists:
+        if p.get("name") == target:
+            full = await get_playlist(p["id"])
+            return full or p
+    new_id = await create_playlist_and_get_id(target)
+    if not new_id:
+        return None
+    full = await get_playlist(new_id)
+    return full or {"id": new_id, "name": target, "tracks": [], "songCount": 0}
+
+
+async def replace_playlist_by_names(playlist_id: str, tracks: list[dict]) -> dict:
+    """Atomically replace a playlist's contents by matching tracks by name/artist.
+    Tracks not in Navidrome are skipped and reported as `missing`.
+    Returns {matched: int, missing: list[{name, artist, album}]}."""
+    if not NAVIDROME_PASSWORD:
+        return {"matched": 0, "missing": tracks or []}
+    # Resolve all song IDs in parallel
+    import asyncio as _aio
+    sem = _aio.Semaphore(6)
+
+    async def _resolve(t: dict):
+        async with sem:
+            sid = await find_song_id(t.get("name", ""), t.get("artist", ""), t.get("album", ""))
+            return (t, sid)
+
+    pairs = await _aio.gather(*[_resolve(t) for t in (tracks or [])])
+    song_ids = [sid for _, sid in pairs if sid]
+    missing = [t for t, sid in pairs if not sid]
+
+    # Clear existing entries
+    pl = await get_playlist(playlist_id)
+    if pl and pl.get("tracks"):
+        count = len(pl["tracks"])
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
+            param_list = list(_params(playlistId=playlist_id).items())
+            for i in range(count - 1, -1, -1):
+                param_list.append(("songIndexToRemove", str(i)))
+            resp = await client.get("/rest/updatePlaylist", params=param_list)
+            resp.raise_for_status()
+
+    # Add new ids in batches
+    if song_ids:
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
+            batch_size = 20
+            for i in range(0, len(song_ids), batch_size):
+                batch = song_ids[i:i + batch_size]
+                param_list = list(_params(playlistId=playlist_id).items())
+                for sid in batch:
+                    param_list.append(("songIdToAdd", sid))
+                resp = await client.get("/rest/updatePlaylist", params=param_list)
+                resp.raise_for_status()
+
+    return {"matched": len(song_ids), "missing": missing}
+
+
 async def create_playlist(name: str, song_ids: list[str]) -> bool:
     """Create a playlist in Navidrome via Subsonic API."""
     if not NAVIDROME_PASSWORD:

@@ -7,6 +7,7 @@ import { showToast, historyBack } from './utils.js';
 import { requestNotificationPermission } from './utils.js';
 import { refreshJobs } from './downloads.js';
 import { loadQueueState } from './player.js';
+import { initUpNext } from './upnext.js';
 import { loadFavoritedArtistIds } from './favorites.js';
 import { restoreSearch } from './search.js';
 
@@ -135,8 +136,9 @@ export async function initApp() {
     refreshJobs();
     store.jobsInterval = setInterval(refreshJobs, 2000);
 
-    // Restore player queue
+    // Restore player queue + initialize Up Next temp playlist (unified queue model)
     loadQueueState();
+    initUpNext().catch(() => {});
 
     // Load favorited artist IDs
     loadFavoritedArtistIds();
