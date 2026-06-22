@@ -26,7 +26,14 @@ let _crossfading = false;
 let _crossfadeTimer = null;
 let _fadingOutDeck = null;
 let _rateReturnTimer = null;
-let _tempoRampTimer = null; // outgoing deck tempo ramp (clearable on rapid skip)
+let _tempoRamp = null; // outgoing deck tempo ramp handle (cancellable on rapid skip)
+function _cancelTempoRamp() {
+  if (_tempoRamp) {
+    _tempoRamp.cancelled = true;
+    if (_tempoRamp.id) cancelAnimationFrame(_tempoRamp.id);
+    _tempoRamp = null;
+  }
+}
 let _beatSync = null;
 
 // DJ data for current and next track (fetched asynchronously)
@@ -113,7 +120,7 @@ function _startCrossfade(seekable = true) {
     _fadingOutDeck.src = '';
     clearTimeout(_crossfadeTimer);
     clearInterval(_rateReturnTimer);
-    cancelAnimationFrame(_tempoRampTimer); _tempoRampTimer = null;
+    _cancelTempoRamp();
     if (_beatSync) { _beatSync.stop(); _beatSync = null; }
     _crossfading = false;
   }
@@ -154,8 +161,9 @@ function _startCrossfade(seekable = true) {
     filterResonance: parseFloat(_djSetting('filter_resonance', '2')),
   });
   const dur = result.duration || _crossfadeDur();
-  // Store tempo ramp timer for cleanup on rapid skip
-  if (result._tempoRampTimer) { clearInterval(_tempoRampTimer); _tempoRampTimer = result._tempoRampTimer; }
+  // Cancel any previous ramp, then adopt the new transition's cancellable handle
+  _cancelTempoRamp();
+  _tempoRamp = result._tempoRamp || null;
   const beatDelay = (result.crossfadeStartTime - _ctx.currentTime) * 1000;
   const timerDur = dur * 1000 + Math.max(0, beatDelay) + 200;
 
@@ -381,6 +389,7 @@ export async function loadAndPlay() {
   _crossfadeTriggered = false;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
+  _currentRecItem = null; // clear stale rec so "Add to playlist" targets the queue track
   const item = store.playerQueue[store.playerIndex];
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -1032,7 +1041,10 @@ export function init() {
         _ab().onProgress(Math.floor(deck.currentTime * 1000), Math.floor(dur * 1000));
       }
       // ── Auto-crossfade: trigger nextTrack when approaching end ──
-      {
+      // Wait for DJ data before calculating trigger (avoids a premature fallback crossfade)
+      if (!_outDjData && deck.currentTime < dur - _crossfadeDur() - 5) {
+        // DJ data not loaded yet and we're far from end — skip the check this tick
+      } else {
         // Outro skip: use detected outro_start or manual setting as effective end
         let effectiveEnd = dur;
         const outroSkip = _djSetting('outro_skip', 'auto');
@@ -1117,7 +1129,10 @@ export function init() {
 
   // Add to playlist
   async function _addToPlaylist() {
-    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    // Prefer the currently displayed track (recommended item if rec is playing)
+    const item = (typeof _currentRecItem !== 'undefined' && _currentRecItem)
+      ? _currentRecItem
+      : (store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null);
     if (!item) return;
     try {
       const data = await apiJson('/api/library/playlists');
@@ -1133,6 +1148,17 @@ export function init() {
         body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
       });
       showToast(`Added to ${picked.name}`);
+      // If adding to the currently playing playlist, append to local queue too
+      if (store.playlistMode && store.playlistMode.id === picked.id) {
+        const key = (cleanName + '|' + cleanArtist).toLowerCase();
+        const exists = store.playerQueue.some(t =>
+          (_decodeEntities(t.name || '').toLowerCase() + '|' + _decodeEntities(t.artist || '').toLowerCase()) === key);
+        if (!exists) {
+          store.playerQueue.push({ ...item, name: cleanName, artist: cleanArtist });
+          renderQueue();
+          saveQueueDebounced();
+        }
+      }
     } catch (e) { showToast('Failed: ' + (e.message || '')); }
   }
   $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);

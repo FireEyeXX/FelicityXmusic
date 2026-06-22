@@ -451,20 +451,24 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
   inDeck.element.preservesPitch = true;
   // Incoming starts at target rate immediately (gain=0, inaudible)
   inDeck.element.playbackRate = inRate;
-  // Outgoing ramps gradually via requestAnimationFrame (smoother than setInterval)
-  let _tempoRampTimer = null;
+  // Outgoing ramps gradually via requestAnimationFrame (smoother than setInterval).
+  // Return a cancellable HANDLE, not a raw rAF id: the tick self-reschedules, so a
+  // raw id goes stale after one frame and the caller could never cancel the loop.
+  // The `cancelled` flag lets a stale loop self-terminate on rapid skip.
+  const _tempoRamp = { id: null, cancelled: false };
   if (outRate !== 1.0 && Math.abs(outDeck.element.playbackRate - outRate) > 0.001) {
     const curRate = outDeck.element.playbackRate;
     const rampStart = performance.now();
     const rampDur = 2000; // 2 seconds
     const tick = () => {
+      if (_tempoRamp.cancelled) return;
       const elapsed = performance.now() - rampStart;
       const t = Math.min(1, elapsed / rampDur);
       outDeck.element.playbackRate = curRate + (outRate - curRate) * t;
-      if (t < 1) _tempoRampTimer = requestAnimationFrame(tick);
-      else _tempoRampTimer = null;
+      if (t < 1) _tempoRamp.id = requestAnimationFrame(tick);
+      else _tempoRamp.id = null;
     };
-    _tempoRampTimer = requestAnimationFrame(tick);
+    _tempoRamp.id = requestAnimationFrame(tick);
   } else {
     outDeck.element.playbackRate = outRate;
   }
@@ -600,11 +604,14 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
     inDeck.sweepFilter.type = 'highpass';
     inDeck.sweepFilter.frequency.setValueAtTime(2000, startCtxTime);
     inDeck.sweepFilter.frequency.exponentialRampToValueAtTime(20, cutTime);
+    // Sharp "drop" at cutTime, but ramp over the last 10ms to avoid a gain click/pop.
     inDeck.gain.gain.setValueAtTime(0.4, startCtxTime);
-    inDeck.gain.gain.setValueAtTime(1, cutTime);
+    inDeck.gain.gain.setValueAtTime(0.4, cutTime - 0.01);
+    inDeck.gain.gain.linearRampToValueAtTime(1, cutTime);
 
     outDeck.gain.gain.setValueAtTime(1, startCtxTime);
-    outDeck.gain.gain.setValueAtTime(0, cutTime);
+    outDeck.gain.gain.setValueAtTime(1, cutTime - 0.01);
+    outDeck.gain.gain.linearRampToValueAtTime(0, cutTime);
 
   } else {
     // 'blend': simple equal-power (fallback)
@@ -615,7 +622,7 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
     inDeck.gain.gain.setValueCurveAtTime(curves.fadeIn, startCtxTime, duration);
   }
 
-  return { crossfadeStartTime: startCtxTime, duration, outRate, inRate, style, _tempoRampTimer };
+  return { crossfadeStartTime: startCtxTime, duration, outRate, inRate, style, _tempoRamp };
 }
 
 /**

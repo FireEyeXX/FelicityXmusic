@@ -24,6 +24,7 @@ let _sourceA = null, _sourceB = null;
 let _lowA = null, _lowB = null;
 let _activeDeck = 'A';
 let _crossfading = false;
+let _crossfadeTriggered = false; // module-scope so loadAndPlay + ended handler share it
 let _crossfadeTimer = null;
 let _fadingOutDeck = null;
 let _rateReturnTimer = null; // Bug #4: stored so we can clear on rapid next
@@ -333,8 +334,10 @@ export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
   // Abort prefetch downloads — current track gets all bandwidth
   abortPrefetch();
+  _crossfadeTriggered = false;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
+  _currentRecItem = null; // clear stale rec so "Add to playlist" targets the queue track
   const item = store.playerQueue[store.playerIndex];
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -903,7 +906,7 @@ export function init() {
   // Both decks need ended/error handlers
   [_deckA, _deckB].forEach(deck => {
     deck.addEventListener('ended', () => {
-      if (deck !== _activeDeckEl() || _crossfading || !deck.src) return;
+      if (deck !== _activeDeckEl() || _crossfading || _crossfadeTriggered || !deck.src) return;
       if (store.repeatMode === 'one') {
         deck.currentTime = 0;
         deck.play().catch(() => {});
@@ -930,7 +933,6 @@ export function init() {
     });
   });
 
-  let _crossfadeTriggered = false;
   // Timeupdate on both decks, but only UI-update from active deck
   [_deckA, _deckB].forEach(deck => {
     deck.addEventListener('timeupdate', () => {
@@ -1065,7 +1067,9 @@ export function init() {
 
   // Add to playlist
   async function _addToPlaylist() {
-    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    const item = (typeof _currentRecItem !== 'undefined' && _currentRecItem)
+      ? _currentRecItem
+      : (store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null);
     if (!item) return;
     try {
       const data = await apiJson('/api/library/playlists');
@@ -1081,6 +1085,16 @@ export function init() {
         body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
       });
       showToast(`Added to ${picked.name}`);
+      if (store.playlistMode && store.playlistMode.id === picked.id) {
+        const key = (cleanName + '|' + cleanArtist).toLowerCase();
+        const exists = store.playerQueue.some(t =>
+          (_decodeEntities(t.name || '').toLowerCase() + '|' + _decodeEntities(t.artist || '').toLowerCase()) === key);
+        if (!exists) {
+          store.playerQueue.push({ ...item, name: cleanName, artist: cleanArtist });
+          renderQueue();
+          saveQueueDebounced();
+        }
+      }
     } catch (e) { showToast('Failed: ' + (e.message || '')); }
   }
   $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);

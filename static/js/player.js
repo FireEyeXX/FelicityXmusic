@@ -77,6 +77,7 @@ export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
+  _currentRecItem = null; // clear stale rec so "Add to playlist" targets the queue track
   const item = store.playerQueue[store.playerIndex];
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -244,7 +245,12 @@ async function _autoCastAndPlay(item, cleanName, cleanArtist) {
 }
 
 // ── Next / Prev ──
+let _lastNextTime = 0;
 export function nextTrack() {
+  // Throttle rapid advances (error/ended chain-skips) — matches crossfade/dj engines
+  const now = Date.now();
+  if (now - _lastNextTime < 500) return;
+  _lastNextTime = now;
   if (store.castDevice) {
     _castTransitioning = true;
     clearTimeout(_castTransitionTimer);
@@ -614,7 +620,9 @@ export function init() {
 
   // Add to playlist
   async function _addToPlaylist() {
-    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    const item = (typeof _currentRecItem !== 'undefined' && _currentRecItem)
+      ? _currentRecItem
+      : (store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null);
     if (!item) return;
     try {
       const data = await apiJson('/api/library/playlists');
@@ -630,6 +638,16 @@ export function init() {
         body: { name: cleanName, artist: cleanArtist, album: item.album || '' },
       });
       showToast(`Added to ${picked.name}`);
+      if (store.playlistMode && store.playlistMode.id === picked.id) {
+        const key = (cleanName + '|' + cleanArtist).toLowerCase();
+        const exists = store.playerQueue.some(t =>
+          (_decodeEntities(t.name || '').toLowerCase() + '|' + _decodeEntities(t.artist || '').toLowerCase()) === key);
+        if (!exists) {
+          store.playerQueue.push({ ...item, name: cleanName, artist: cleanArtist });
+          renderQueue();
+          saveQueueDebounced();
+        }
+      }
     } catch (e) { showToast('Failed: ' + (e.message || '')); }
   }
   $('#playerAddToPlaylist').addEventListener('click', _addToPlaylist);
