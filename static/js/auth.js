@@ -2,7 +2,7 @@
 
 import { store } from './store.js';
 import { $, $$ } from './utils.js';
-import { apiJson } from './api.js';
+import { apiJson, refreshStreamToken } from './api.js';
 import { showToast, historyBack } from './utils.js';
 import { requestNotificationPermission } from './utils.js';
 import { refreshJobs } from './downloads.js';
@@ -35,10 +35,12 @@ export async function checkVersion() {
 export function logout() {
   store.authToken = '';
   store.currentUser = null;
+  store.streamToken = null;
   localStorage.removeItem('ms_token');
   $('#appContainer').style.display = 'none';
   $('#loginScreen').style.display = '';
   if (store.jobsInterval) clearInterval(store.jobsInterval);
+  if (store.streamTokenInterval) { clearInterval(store.streamTokenInterval); store.streamTokenInterval = null; }
 }
 
 // ── Login ──
@@ -135,6 +137,12 @@ export async function initApp() {
     // Start jobs polling
     refreshJobs();
     store.jobsInterval = setInterval(refreshJobs, 2000);
+
+    // Mint a stream-scoped token (kept out of the session JWT) and refresh before
+    // its 6h TTL expires; await once so the first stream URL has it.
+    refreshStreamToken();
+    if (store.streamTokenInterval) clearInterval(store.streamTokenInterval);
+    store.streamTokenInterval = setInterval(refreshStreamToken, 5 * 3600 * 1000);
 
     // Restore player queue + initialize Up Next temp playlist (unified queue model)
     getPlayerModule().then(m => m.loadQueueState());

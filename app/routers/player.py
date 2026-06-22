@@ -73,6 +73,13 @@ async def player_stream(name: str, artist: str = "", quality: str = "standard",
                                   media_type="audio/mpeg", headers=headers)
 
 
+@router.get("/stream-token")
+async def get_stream_token(user: dict = Depends(auth.get_current_user)):
+    """Mint a short-lived, stream-scoped token for <audio>/prefetch stream URLs,
+    so the full session JWT never appears in a URL/log/Referer."""
+    return {"token": auth.create_stream_token(user["username"])}
+
+
 @router.get("/queue")
 async def get_player_queue(request: Request, user: dict = Depends(auth.get_current_user)):
     device_id = _get_device_id(request)

@@ -113,7 +113,7 @@ export async function loadAndPlay() {
     if (cached) {
       audio.src = cached;
     } else {
-      const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken });
+      const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) });
       audio.src = `/api/player/stream?${params}`;
     }
     audio.load();
@@ -355,7 +355,7 @@ export function playRecTrack(item) {
     if (cached) {
       audio.src = cached;
     } else {
-      const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken });
+      const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) });
       audio.src = `/api/player/stream?${params}`;
     }
     audio.load();
@@ -484,7 +484,7 @@ export async function loadQueueState() {
         $('#playerTitle').textContent = item.name || '';
         $('#playerArtist').textContent = item.artist || '';
         // Pre-set audio source so play button works immediately
-        const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: store.authToken });
+        const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: (store.streamToken || store.authToken) });
         audio.src = `/api/player/stream?${params}`;
         audio.preload = 'none';
         if (data.position_seconds > 0) {

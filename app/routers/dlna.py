@@ -48,8 +48,9 @@ async def scan_devices(user: dict = Depends(auth.get_current_user)):
 async def cast_to_device(req: CastRequest, request: Request, user: dict = Depends(auth.get_current_user)):
     import asyncio
     sk = _session_key(user, request)
-    # Use the user's token for stream authentication
-    token = auth._create_token(user["username"], user.get("is_admin", False))
+    # Stream-scoped, short-lived token — this token is sent cleartext to the UPnP
+    # renderer and embedded in DIDL metadata, so it must NOT be the full session JWT.
+    token = auth.create_stream_token(user["username"], ttl=24 * 3600)
     # Non-blocking: cast runs in background, UI doesn't freeze
     asyncio.create_task(dlna.cast_to_device(
         sk, req.device_id, req.name, req.artist, token,

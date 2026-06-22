@@ -137,7 +137,7 @@ async function _startFetch(entry) {
   try {
     const cleanName = _decodeEntities(entry.item.name || '');
     const cleanArtist = _decodeEntities(entry.item.artist || '');
-    const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken });
+    const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) });
     const res = await apiFetch(`/api/player/stream?${params}`, { signal: controller.signal });
     if (!res.ok) { _fetching.delete(entry.key); _processNext(); return; }
     // Validate content-type — reject HTML/JSON error pages served with 200 status.

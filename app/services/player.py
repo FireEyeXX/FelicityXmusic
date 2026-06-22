@@ -17,10 +17,19 @@ MUSIC_DIR = Path(os.environ.get("MUSIC_DIR", "/music"))
 # In-memory cache for resolved YouTube stream URLs (4h TTL)
 _url_cache: dict[str, tuple[dict, float]] = {}
 _URL_TTL = 4 * 3600  # 4 hours
+_URL_CACHE_MAX = 500  # bound memory — keys derive from user-supplied track/artist names
 
 
 def _cache_key(name: str, artist: str) -> str:
     return f"{artist.lower().strip()}:{name.lower().strip()}"
+
+
+def _cache_put(key: str, result: dict) -> None:
+    """Store a resolved source, evicting the oldest entry when the cache is full."""
+    if key not in _url_cache and len(_url_cache) >= _URL_CACHE_MAX:
+        oldest = min(_url_cache, key=lambda k: _url_cache[k][1])
+        _url_cache.pop(oldest, None)
+    _url_cache[key] = (result, time.time())
 
 
 def _sanitize(s: str) -> str:
@@ -59,9 +68,13 @@ def _resolve_local_file(name: str, artist: str) -> dict | None:
             for search_dir in search_dirs:
                 for title in title_variants:
                     for ext in ("flac", "mp3", "opus", "m4a"):
-                        matches = list(search_dir.rglob(f"{title}.{ext}"))
-                        if matches:
-                            return {"source": "local", "path": str(matches[0])}
+                        for p in search_dir.rglob(f"{title}.{ext}"):
+                            # Containment guard: never return a path outside MUSIC_DIR.
+                            try:
+                                p.resolve().relative_to(MUSIC_DIR.resolve())
+                            except ValueError:
+                                continue
+                            return {"source": "local", "path": str(p)}
         if not safe_artist:
             break  # no point doing broad search again without artist
     return None
@@ -139,19 +152,19 @@ async def resolve_stream(name: str, artist: str) -> dict | None:
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _resolve_local_file, name, artist)
     if result:
-        _url_cache[key] = (result, time.time())
+        _cache_put(key, result)
         return result
 
     # Try Navidrome
     result = await _resolve_navidrome(name, artist)
     if result:
-        _url_cache[key] = (result, time.time())
+        _cache_put(key, result)
         return result
 
     # Fall back to YouTube
     result = await _resolve_youtube(name, artist)
     if result:
-        _url_cache[key] = (result, time.time())
+        _cache_put(key, result)
         return result
 
     return None
@@ -233,6 +246,10 @@ async def cache_navidrome_stream(song_id: str, lossless: bool = False) -> str | 
     import tempfile
     cache_dir = os.path.join(tempfile.gettempdir(), "ms-nav-cache")
     os.makedirs(cache_dir, exist_ok=True)
+    try:
+        os.chmod(cache_dir, 0o700)  # keep cached audio private to the app user
+    except OSError:
+        pass
     if lossless:
         cache_path = os.path.join(cache_dir, f"{song_id}.flac")
         params = library._params(id=song_id)  # No format/bitrate = original
@@ -300,6 +317,10 @@ async def cache_youtube_stream(youtube_url: str, name: str, artist: str, bitrate
     import tempfile, hashlib
     cache_dir = os.path.join(tempfile.gettempdir(), "ms-yt-cache")
     os.makedirs(cache_dir, exist_ok=True)
+    try:
+        os.chmod(cache_dir, 0o700)  # keep cached audio private to the app user
+    except OSError:
+        pass
     key = hashlib.md5(f"{artist}:{name}".lower().encode()).hexdigest()[:12]
     suffix = "hq" if bitrate != "192k" else ""
     cache_path = os.path.join(cache_dir, f"{key}{suffix}.mp3")

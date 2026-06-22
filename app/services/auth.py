@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -26,6 +27,11 @@ def _get_jwt_secret():
 
 JWT_SECRET = _get_jwt_secret()
 TOKEN_EXPIRY = 7 * 24 * 3600  # 7 days
+STREAM_TOKEN_EXPIRY = 6 * 3600  # 6 hours — stream-scoped tokens used in <audio>/cast URLs
+
+# Usernames become filesystem paths (per-user queue files) — restrict to a safe set
+# and require an alphanumeric first char so "." / ".." / "-x" can't slip through.
+_USERNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
 
 
 def _ensure_data_dir():
@@ -76,6 +82,22 @@ def _create_token(username: str, is_admin: bool) -> str:
     return f"{payload_b64}.{sig}"
 
 
+def create_stream_token(username: str, ttl: int = STREAM_TOKEN_EXPIRY) -> str:
+    """Short-lived, stream-scoped token (aud=stream) for use in <audio>/cast stream
+    URLs. Accepted only by stream endpoints; get_current_user rejects aud=stream, so
+    a leaked stream token cannot read the library, settings, or account.
+    The cast path passes a longer ttl since a renderer holds the URL for the session."""
+    payload = json.dumps({
+        "sub": username,
+        "aud": "stream",
+        "exp": int(time.time()) + ttl,
+    })
+    import base64
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
+    sig = hmac.new(JWT_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
 def _decode_token(token: str) -> dict | None:
     import base64
     try:
@@ -110,6 +132,8 @@ def _user_perms(user: dict) -> dict:
 
 def init_admin(username: str, password: str):
     """Create admin user if no users exist."""
+    if not _USERNAME_RE.match(username or ""):
+        raise ValueError("Invalid admin username")
     users = _load_users()
     if not users:
         users[username] = {
@@ -148,6 +172,9 @@ def get_current_user(request: Request) -> dict:
     payload = _decode_token(token)
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
+    if payload.get("aud") == "stream":
+        # Stream-scoped tokens may only be used on stream endpoints.
+        raise HTTPException(401, "Stream token not valid for this endpoint")
 
     users = _load_users()
     user_data = users.get(payload["sub"])
@@ -178,6 +205,8 @@ MIN_PASSWORD_LENGTH = 8
 def create_user(username: str, password: str, is_admin: bool = False,
                 allowed_formats: list[str] | None = None,
                 allowed_methods: list[str] | None = None) -> bool:
+    if not _USERNAME_RE.match(username or ""):
+        raise ValueError("Username must be 1-64 chars: letters, digits, _ . - (and start alphanumeric)")
     if len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
     users = _load_users()

@@ -35,8 +35,11 @@ def _stream_auth(request: Request, token: str = ""):
         if not payload:
             raise HTTPException(401, "Invalid token")
         users = auth_service._load_users()
-        user_data = users.get(payload["sub"], {})
-        return {"username": payload["sub"], "is_admin": payload.get("admin", False), **auth_service._user_perms(user_data)}
+        user_data = users.get(payload["sub"])
+        if user_data is None:
+            # Mirror get_current_user: a deleted user's still-unexpired token is rejected.
+            raise HTTPException(401, "User no longer exists")
+        return {"username": payload["sub"], "is_admin": user_data.get("is_admin", False), **auth_service._user_perms(user_data)}
     return auth_service.get_current_user(request)
 
 

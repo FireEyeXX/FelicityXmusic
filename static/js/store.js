@@ -11,6 +11,8 @@ export const store = {
 
   // ── Auth ──
   authToken: localStorage.getItem('ms_token') || '',
+  streamToken: null,            // short-lived, stream-scoped token used in stream URLs
+  streamTokenInterval: null,
   currentUser: null,
 
   // ── App Init ──

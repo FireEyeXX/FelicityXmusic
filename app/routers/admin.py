@@ -16,8 +16,12 @@ async def get_users(user: dict = Depends(auth.require_admin)):
 
 @router.post("/users")
 async def create_user(req: CreateUserRequest, user: dict = Depends(auth.require_admin)):
-    if not auth.create_user(req.username, req.password, req.is_admin,
-                            req.allowed_formats, req.allowed_methods):
+    try:
+        created = auth.create_user(req.username, req.password, req.is_admin,
+                                   req.allowed_formats, req.allowed_methods)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not created:
         raise HTTPException(409, "User already exists")
     return {"status": "created", "username": req.username}
 

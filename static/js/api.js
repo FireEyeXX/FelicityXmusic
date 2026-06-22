@@ -32,3 +32,20 @@ export async function apiJson(url, opts = {}) {
   const res = await apiFetch(url, opts);
   return res.json();
 }
+
+// ── Stream token ──
+// Mint a short-lived, stream-scoped token so the full session JWT never appears in
+// stream URLs (logs, history, Referer, DLNA metadata). Stored in store.streamToken
+// and used by the player/prefetch when building /api/player/stream URLs.
+export async function refreshStreamToken() {
+  try {
+    const d = await apiJson('/api/player/stream-token');
+    store.streamToken = d.token || null;
+    return store.streamToken;
+  } catch (e) {
+    // Playback still works via the session-token fallback, but the C2/C3 hardening
+    // silently degrades — surface it once so it's diagnosable.
+    console.warn('Stream token refresh failed; stream URLs fall back to the session token.', e);
+    return null;
+  }
+}

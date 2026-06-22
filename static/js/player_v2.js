@@ -366,7 +366,7 @@ export async function loadAndPlay() {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
 
     const currentDeck = _activeDeckEl();
     if (!currentDeck.paused && currentDeck.src) {
@@ -671,7 +671,7 @@ export async function playRecTrack(item) {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
     const cached = getCachedUrl(cleanName, cleanArtist);
     const src = cached || streamUrl;
     const curDeck = _activeDeckEl();
@@ -821,7 +821,7 @@ export async function loadQueueState() {
         $('#playerTitle').textContent = item.name || '';
         $('#playerArtist').textContent = item.artist || '';
         const deck = _activeDeckEl();
-        const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: store.authToken });
+        const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: (store.streamToken || store.authToken) });
         deck.src = `/api/player/stream?${params}`;
         deck.preload = 'none';
         if (data.position_seconds > 0) {
