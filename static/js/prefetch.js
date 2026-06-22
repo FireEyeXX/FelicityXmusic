@@ -12,6 +12,14 @@ function _prefetchCount() { return parseInt(localStorage.getItem('ms_dj_prefetch
 
 let _paused = false;
 export function pausePrefetch() { _paused = true; }
+/** Abort all in-progress prefetch downloads to free bandwidth for the playing track. */
+export function abortPrefetch() {
+  _paused = true;
+  for (const [key, state] of _fetching) {
+    state.controller.abort();
+    _fetching.delete(key);
+  }
+}
 export function resumePrefetch() {
   _paused = false;
   // Rebuild queue from current position (clear stale entries)
