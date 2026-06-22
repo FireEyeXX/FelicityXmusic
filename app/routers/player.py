@@ -134,7 +134,7 @@ async def get_queue_recommendations(
     if not tracks:
         raise HTTPException(400, "Queue is empty")
     source = app_settings._settings.get("recommendation_source", "combined")
-    recs = await radio.get_playlist_recommendations(tracks, source, limit, exclude=tracks)
+    recs = await radio.get_playlist_recommendations(tracks, source, limit, exclude=tracks, user=user)
     return {"tracks": recs}
 
 
@@ -150,5 +150,6 @@ async def get_playlist_recommendations(
     recs = await radio.get_playlist_recommendations(
         req.tracks, source, req.limit,
         exclude=req.tracks, skipped=req.skipped, accepted=req.accepted,
+        user=user, tempo_coherent=req.tempo_coherent,
     )
     return {"tracks": recs}

@@ -122,6 +122,15 @@ class RecommendationRequest(BaseModel):
     limit: int = 15
     skipped: list[dict] = []
     accepted: list[dict] = []
+    tempo_coherent: bool = False
+
+
+class LikeRequest(BaseModel):
+    name: str
+    artist: str = ""
+    album: str = ""
+    id: str = ""
+    image: str = ""
 
 
 class PodcastSubRequest(BaseModel):

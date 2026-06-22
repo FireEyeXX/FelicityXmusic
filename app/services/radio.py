@@ -4,7 +4,9 @@ import asyncio
 import logging
 import random
 
+from app.services import bpm as bpm_service
 from app.services import lastfm
+from app.services import library
 from app.services import search_providers
 from app.services import spotify
 from app.services import settings as app_settings
@@ -269,6 +271,126 @@ async def _build_profile_uncached(tracks: list[dict], key: str, now: float) -> d
     return profile
 
 
+# ── Persistent taste profile (Spotify → Navidrome → queue) ──────────
+# Per-user cache: username -> (timestamp, taste_tracks)
+_taste_cache: dict[str, tuple[float, list[dict]]] = {}
+_taste_locks: dict[str, asyncio.Lock] = {}
+_TASTE_TTL = 600  # 10 min, mirrors the profile cache
+
+
+async def _gather_taste_tracks(user: dict | None) -> list[dict]:
+    """Collect durable-taste tracks from Spotify, then Navidrome, gracefully.
+
+    Fallback chain: Spotify (liked + top) → Navidrome (starred + top-played) → [].
+    Each source failure degrades to []; absence of all sources = empty list, so
+    the caller falls back to queue-only behavior (today's behavior)."""
+    tracks: list[dict] = []
+
+    # (a) Spotify: liked + me/top/tracks (needs per-user OAuth or global token)
+    creds = None
+    have_spotify = False
+    if user is not None and spotify.SPOTIFY_CLIENT_ID:
+        try:
+            from app.dependencies import _user_spotify_creds
+            creds = _user_spotify_creds(user)
+            # creds is a dict (per-user) OR None with a global refresh token present
+            have_spotify = bool(creds) or bool(spotify._get_global_refresh_token())
+        except Exception:
+            have_spotify = False
+
+    if have_spotify:
+        async def _liked():
+            try:
+                data = await spotify.get_liked_tracks(creds=creds)
+                return (data or {}).get("tracks", [])[:50]
+            except Exception as e:
+                logger.warning("Taste: Spotify liked tracks failed: %s", e)
+                return []
+
+        async def _top():
+            try:
+                return await spotify.get_top_tracks("medium_term", 50, creds=creds)
+            except Exception as e:
+                logger.warning("Taste: Spotify top tracks failed: %s", e)
+                return []
+
+        sp_results = await asyncio.gather(_liked(), _top(), return_exceptions=True)
+        for r in sp_results:
+            if isinstance(r, list):
+                tracks.extend(r)
+
+    # (b) Navidrome: starred + top-played (always attempted; degrades to [])
+    nav_results = await asyncio.gather(library.get_starred(), return_exceptions=True)
+    for r in nav_results:
+        if isinstance(r, list):
+            tracks.extend(r)
+
+    return _dedup(tracks)
+
+
+async def _build_taste_profile(user: dict | None) -> dict | None:
+    """Build a durable taste profile (artist weights + tag centroid) from Spotify
+    likes/top + Navidrome starred. Cached per-user with a short TTL. Returns None
+    when no durable-taste source is available (so caller stays queue-only)."""
+    import time as _t
+    uname = (user or {}).get("username", "_anon")
+    now = _t.time()
+    cached = _taste_cache.get(uname)
+    if cached and now - cached[0] < _TASTE_TTL:
+        taste_tracks = cached[1]
+    else:
+        lock = _taste_locks.setdefault(uname, asyncio.Lock())
+        async with lock:
+            cached = _taste_cache.get(uname)
+            if cached and now - cached[0] < _TASTE_TTL:
+                taste_tracks = cached[1]
+            else:
+                taste_tracks = await _gather_taste_tracks(user)
+                _taste_cache[uname] = (now, taste_tracks)
+                # cheap prune of stale entries
+                for k in [k for k, (ts, _) in _taste_cache.items()
+                          if now - ts >= _TASTE_TTL and k != uname]:
+                    _taste_cache.pop(k, None)
+                    _taste_locks.pop(k, None)
+
+    if not taste_tracks:
+        return None
+    return await _build_profile(taste_tracks)
+
+
+def _merge_profiles(queue_profile: dict, taste_profile: dict | None,
+                    taste_weight: float = 0.6) -> dict:
+    """Blend the current-queue profile with the durable taste profile.
+
+    The queue stays the recency/context signal; taste adds durable direction.
+    Returns a new profile dict with merged artist_weights / tags and recomputed
+    top_artists / top_tags. When taste_profile is None, returns queue_profile."""
+    if not taste_profile:
+        return queue_profile
+
+    def _blend(a: dict, b: dict, bw: float) -> dict:
+        out = dict(a)
+        for k, v in b.items():
+            out[k] = out.get(k, 0.0) + v * bw
+        return out
+
+    artist_weights = _blend(queue_profile["artist_weights"],
+                            taste_profile["artist_weights"], taste_weight)
+    total = sum(artist_weights.values()) or 1.0
+    artist_weights = {k: v / total for k, v in artist_weights.items()}
+    top_artists = sorted(artist_weights.items(), key=lambda kv: -kv[1])[:8]
+
+    tags = _blend(queue_profile["tags"], taste_profile["tags"], taste_weight)
+    top_tags = sorted(tags.items(), key=lambda kv: -kv[1])[:5]
+
+    return {
+        "artist_weights": artist_weights,
+        "top_artists": top_artists,
+        "tags": tags,
+        "top_tags": top_tags,
+    }
+
+
 def _weighted_sample_seeds(tracks: list[dict], profile: dict, k: int = 5) -> list[dict]:
     """Pick seeds weighted by artist frequency, with light shuffling."""
     if not tracks:
@@ -306,6 +428,90 @@ def _weighted_sample_seeds(tracks: list[dict], profile: dict, k: int = 5) -> lis
     return picked
 
 
+def _parse_camelot(code: str | None) -> tuple[int, str] | None:
+    """Parse a Camelot code like '8A' into (number, letter)."""
+    if not code or not isinstance(code, str):
+        return None
+    import re as _re
+    m = _re.match(r"^(\d{1,2})([AB])$", code.strip(), _re.IGNORECASE)
+    if not m:
+        return None
+    num = int(m.group(1))
+    if num < 1 or num > 12:
+        return None
+    return num, m.group(2).upper()
+
+
+def _camelot_bonus(seed_camelot: str | None, cand_camelot: str | None) -> float:
+    """Harmonic-key bonus mirroring djmix.getTransitionStyle: same/relative key →
+    'blend' (best), ±1/±2 on the wheel (same letter) → 'bass_swap', else neutral."""
+    a = _parse_camelot(seed_camelot)
+    b = _parse_camelot(cand_camelot)
+    if not a or not b:
+        return 0.0
+    # same key or relative major/minor (same number)
+    if a[0] == b[0]:
+        return 3.0
+    if a[1] == b[1]:
+        diff = abs(a[0] - b[0])
+        dist = min(diff, 12 - diff)
+        if dist <= 2:
+            return 1.0
+    return 0.0
+
+
+def _seed_tempo_context(seeds: list[dict]) -> tuple[float | None, str | None]:
+    """Derive a coherent BPM (median) + dominant Camelot key from seeds, using the
+    bpm cache. Only locally-analyzed tracks have BPM; returns (None, None) when no
+    seed has known tempo (→ no tempo penalty/bonus applied)."""
+    import numpy as _np
+    bpms: list[float] = []
+    camelots: list[str] = []
+    for s in seeds:
+        c = bpm_service.get_cached_bpm(s.get("name", ""), s.get("artist", ""))
+        if not c:
+            continue
+        b = c.get("bpm")
+        if b and b > 0 and (c.get("confidence") or 0) >= 0.5:
+            bpms.append(float(b))
+        if c.get("camelot"):
+            camelots.append(c["camelot"])
+    if not bpms:
+        return None, None
+    seed_bpm = float(_np.median(bpms))
+    # Only treat the key as coherent if the seeds largely agree on it.
+    seed_camelot = None
+    if camelots:
+        top = max(set(camelots), key=camelots.count)
+        if camelots.count(top) >= max(1, len(camelots) // 2):
+            seed_camelot = top
+    return seed_bpm, seed_camelot
+
+
+def _tempo_coherence_score(track: dict, seed_bpm: float, seed_camelot: str | None) -> float:
+    """Confidence-aware tempo/key term (DJ context). Penalizes candidates whose
+    BPM falls outside a ±8 band, bonuses harmonic-key matches. Candidate BPM is
+    only known for locally-analyzed tracks → no penalty when unknown."""
+    BAND = 8.0
+    c = bpm_service.get_cached_bpm(track.get("name", ""), track.get("artist", ""))
+    if not c:
+        return 0.0  # unknown BPM → degrade gracefully, no penalty
+    cand_bpm = c.get("bpm")
+    conf = c.get("confidence") or 0.3
+    if not cand_bpm or cand_bpm <= 0 or conf < 0.5:
+        return 0.0  # untrusted BPM → treat as unknown
+    score = 0.0
+    delta = abs(float(cand_bpm) - seed_bpm)
+    if delta <= BAND:
+        # In-band: small reward scaled by how tight the match is.
+        score += 2.0 * (1.0 - delta / BAND)
+    else:
+        # Out-of-band: penalty grows with distance, capped.
+        score -= min(4.0, (delta - BAND) / BAND * 2.0)
+    score += _camelot_bonus(seed_camelot, c.get("camelot"))
+    return score
+
+
 async def get_playlist_recommendations(
     tracks: list[dict],
     source: str = "combined",
@@ -313,19 +519,26 @@ async def get_playlist_recommendations(
     exclude: list[dict] | None = None,
     skipped: list[dict] | None = None,
     accepted: list[dict] | None = None,
+    user: dict | None = None,
+    tempo_coherent: bool = False,
 ) -> list[dict]:
     """Profile-driven recommendations.
 
-    1. Build playlist profile (artist weights + Last.fm tag centroid)
+    1. Build playlist profile (artist weights + Last.fm tag centroid), blended
+       with a durable per-user taste profile (Spotify likes/top + Navidrome starred)
     2. Weighted seed selection
-    3. Multi-source recall: per-artist radio, per-tag tracks, similar-artists, per-track similar
-    4. Score+rerank by tag overlap, multi-source agreement, feedback
+    3. Multi-source recall: per-artist radio, per-tag tracks, similar-artists,
+       per-track similar, Navidrome similar (library-grounded)
+    4. Score+rerank by tag overlap, multi-source agreement, library bonus,
+       optional tempo coherence, feedback
     5. Diversify (max 2 per artist)
     """
     if not tracks:
         return []
 
-    profile = await _build_profile(tracks)
+    queue_profile = await _build_profile(tracks)
+    taste_profile = await _build_taste_profile(user)
+    profile = _merge_profiles(queue_profile, taste_profile)
     seeds = _weighted_sample_seeds(tracks, profile, k=5)
 
     playlist_artists = set(profile["artist_weights"].keys())
@@ -387,6 +600,16 @@ async def get_playlist_recommendations(
         tasks.append(_get_spotify_playlist_recs(seeds, limit=15))
         source_map.append("spotify")
 
+    # F) Navidrome similar songs per seed (library-grounded recall; degrades to [])
+    if library.NAVIDROME_PASSWORD:
+        for seed in seeds[:3]:
+            tasks.append(library.get_similar_songs(
+                _norm_artist(seed.get("artist") or ""),
+                seed.get("name", ""),
+                count=15,
+            ))
+            source_map.append("navidrome")
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── Aggregate candidates with source tracking ──────────────────
@@ -412,6 +635,9 @@ async def get_playlist_recommendations(
     exclude_keys = {_norm_key(t) for t in (exclude or [])}
     exclude_keys |= skipped_keys
 
+    # ── Tempo context for DJ-style coherence (gated by tempo_coherent) ──
+    seed_bpm, seed_camelot = (_seed_tempo_context(seeds) if tempo_coherent else (None, None))
+
     # ── Score candidates ───────────────────────────────────────────
     scored: list[tuple[float, dict]] = []
 
@@ -435,6 +661,12 @@ async def get_playlist_recommendations(
         # Slight bonus if artist already in playlist (familiar) but not too strong
         if artist_n in playlist_artists:
             score += 0.5
+        # Library-grounded bonus: tracks Navidrome surfaced as similar are "in your library"
+        if "navidrome" in entry["sources"]:
+            score += 1.5
+        # Tempo coherence (DJ context only): confidence-aware, degrades when BPM unknown
+        if seed_bpm is not None:
+            score += _tempo_coherence_score(track, seed_bpm, seed_camelot)
         # Penalty for skipped artists
         if artist_n in skipped_artists:
             score -= 4.0

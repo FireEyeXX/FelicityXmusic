@@ -186,6 +186,110 @@ async def find_song_id(name: str, artist: str, album: str = "") -> str | None:
     return None
 
 
+def _song_to_dict(song: dict) -> dict:
+    """Map a Subsonic song object to the app's track dict shape."""
+    return {
+        "id": song.get("id", ""),
+        "name": song.get("title", ""),
+        "artist": song.get("artist", ""),
+        "album": song.get("album", ""),
+        "image": f"/api/library/cover/{song['coverArt']}" if song.get("coverArt") else "",
+        "type": "track",
+    }
+
+
+async def get_similar_songs(artist: str, title: str, count: int = 20) -> list[dict]:
+    """Subsonic getSimilarSongs2: songs similar to a given track (needs a song id).
+    Resolves the track to a Navidrome song id first, then asks for similar songs.
+    Returns [] gracefully when Navidrome is unreachable or nothing matches."""
+    if not NAVIDROME_PASSWORD:
+        return []
+    try:
+        song_id = await find_song_id(title, artist)
+        if not song_id:
+            return []
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=15) as client:
+            resp = await client.get("/rest/getSimilarSongs2",
+                                    params=_params(id=song_id, count=count))
+            resp.raise_for_status()
+            sr = resp.json().get("subsonic-response", {})
+            if sr.get("status") != "ok":
+                return []
+            songs = sr.get("similarSongs2", {}).get("song", [])
+            if isinstance(songs, dict):
+                songs = [songs]
+            return [_song_to_dict(s) for s in songs if s.get("title")]
+    except Exception:
+        return []
+
+
+async def get_top_songs(artist: str, count: int = 20) -> list[dict]:
+    """Subsonic getTopSongs: most popular songs for an artist (by name).
+    Returns [] gracefully when Navidrome is unreachable or nothing matches."""
+    if not NAVIDROME_PASSWORD or not artist:
+        return []
+    try:
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=15) as client:
+            resp = await client.get("/rest/getTopSongs",
+                                    params=_params(artist=artist, count=count))
+            resp.raise_for_status()
+            sr = resp.json().get("subsonic-response", {})
+            if sr.get("status") != "ok":
+                return []
+            songs = sr.get("topSongs", {}).get("song", [])
+            if isinstance(songs, dict):
+                songs = [songs]
+            return [_song_to_dict(s) for s in songs if s.get("title")]
+    except Exception:
+        return []
+
+
+async def get_starred() -> list[dict]:
+    """Subsonic getStarred2: the user's starred (favorited) songs.
+    Returns [] gracefully when Navidrome is unreachable."""
+    if not NAVIDROME_PASSWORD:
+        return []
+    try:
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=15) as client:
+            resp = await client.get("/rest/getStarred2", params=_params())
+            resp.raise_for_status()
+            sr = resp.json().get("subsonic-response", {})
+            if sr.get("status") != "ok":
+                return []
+            songs = sr.get("starred2", {}).get("song", [])
+            if isinstance(songs, dict):
+                songs = [songs]
+            return [_song_to_dict(s) for s in songs if s.get("title")]
+    except Exception:
+        return []
+
+
+async def star_song(song_id: str) -> bool:
+    """Subsonic star: mark a song as a favorite in Navidrome."""
+    if not NAVIDROME_PASSWORD or not song_id:
+        return False
+    try:
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=10) as client:
+            resp = await client.get("/rest/star", params=_params(id=song_id))
+            resp.raise_for_status()
+            return resp.json().get("subsonic-response", {}).get("status") == "ok"
+    except Exception:
+        return False
+
+
+async def unstar_song(song_id: str) -> bool:
+    """Subsonic unstar: remove a song from favorites in Navidrome."""
+    if not NAVIDROME_PASSWORD or not song_id:
+        return False
+    try:
+        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=10) as client:
+            resp = await client.get("/rest/unstar", params=_params(id=song_id))
+            resp.raise_for_status()
+            return resp.json().get("subsonic-response", {}).get("status") == "ok"
+    except Exception:
+        return False
+
+
 async def get_playlists() -> list[dict]:
     """Get all playlists from Navidrome via Subsonic API."""
     if not NAVIDROME_PASSWORD:

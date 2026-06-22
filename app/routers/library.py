@@ -1,10 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 
 import asyncio
+import json
+import os
+import threading
+import time
 
 from pydantic import BaseModel
 
-from app.models import CreatePlaylistRequest, AddTracksByIdRequest, RemoveTracksRequest, AddTrackByNameRequest, DeleteAlbumRequest
+from app.models import CreatePlaylistRequest, AddTracksByIdRequest, RemoveTracksRequest, AddTrackByNameRequest, DeleteAlbumRequest, LikeRequest
 from app.services import auth, library, downloader, player
 from app.services.jobs import create_job
 from app.dependencies import _get_device_id
@@ -20,6 +24,41 @@ class BatchAddRequest(BaseModel):
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+# ── Server-side liked set (per-user, persisted JSON; mirrors users/settings) ──
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+LIKES_FILE = os.path.join(DATA_DIR, "likes.json")
+_likes_lock = threading.Lock()
+
+
+def _like_key(req: LikeRequest) -> str:
+    """Stable per-track key: by id when present, else lowercased 'artist:name'."""
+    if req.id:
+        return req.id
+    return f"{(req.artist or '').lower().strip()}:{(req.name or '').lower().strip()}"
+
+
+def _load_likes() -> dict:
+    """Load the per-user liked map: {username: {key: track_dict}}."""
+    if os.path.exists(LIKES_FILE):
+        try:
+            with open(LIKES_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_likes(data: dict):
+    # Atomic write: a crash mid-dump would otherwise truncate likes.json and
+    # _load_likes() would silently drop ALL users' likes. Write a temp file in the
+    # same dir, then os.replace() (atomic on the same filesystem).
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = LIKES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, LIKES_FILE)
 
 
 @router.get("/cover/{cover_id}")
@@ -266,3 +305,107 @@ async def delete_playlist(playlist_id: str, user: dict = Depends(auth.get_curren
     if not ok:
         raise HTTPException(500, "Failed to delete playlist")
     return {"status": "deleted"}
+
+
+@router.post("/like")
+async def like_track(req: LikeRequest, user: dict = Depends(auth.get_current_user)):
+    """Like a track: star in Navidrome if it resolves locally, AND always record
+    in the server-side liked set (likes.json). Robust when Navidrome is down."""
+    # Star in Navidrome (best-effort)
+    song_id = req.id
+    if not song_id:
+        try:
+            song_id = await library.find_song_id(req.name, req.artist, req.album)
+        except Exception:
+            song_id = None
+    if song_id:
+        try:
+            await library.star_song(song_id)
+        except Exception:
+            pass
+
+    # Always persist to liked.json (per-user)
+    key = _like_key(req)
+    with _likes_lock:
+        likes = _load_likes()
+        user_likes = likes.setdefault(user["username"], {})
+        user_likes[key] = {
+            "name": req.name,
+            "artist": req.artist,
+            "album": req.album,
+            "id": song_id or req.id,
+            "image": req.image,
+            "ts": int(time.time()),
+        }
+        _save_likes(likes)
+    return {"liked": True}
+
+
+@router.post("/unlike")
+async def unlike_track(req: LikeRequest, user: dict = Depends(auth.get_current_user)):
+    """Unlike a track: unstar in Navidrome if local, AND remove from liked.json."""
+    song_id = req.id
+    if not song_id:
+        try:
+            song_id = await library.find_song_id(req.name, req.artist, req.album)
+        except Exception:
+            song_id = None
+    if song_id:
+        try:
+            await library.unstar_song(song_id)
+        except Exception:
+            pass
+
+    key = _like_key(req)
+    with _likes_lock:
+        likes = _load_likes()
+        user_likes = likes.get(user["username"], {})
+        # Remove by computed key and also by resolved song_id (in case it was stored differently)
+        user_likes.pop(key, None)
+        if song_id:
+            user_likes.pop(song_id, None)
+        likes[user["username"]] = user_likes
+        _save_likes(likes)
+    return {"liked": False}
+
+
+@router.get("/likes")
+async def get_likes(user: dict = Depends(auth.get_current_user)):
+    """Return the merged liked list: Navidrome getStarred2 ∪ local likes.json,
+    newest first. Robust when Navidrome is unreachable (local-only fallback)."""
+    merged: dict[str, dict] = {}
+
+    # Local liked set (carries ts for ordering)
+    with _likes_lock:
+        likes = _load_likes()
+    user_likes = likes.get(user["username"], {})
+    for key, t in user_likes.items():
+        merged[key] = {
+            "name": t.get("name", ""),
+            "artist": t.get("artist", ""),
+            "album": t.get("album", ""),
+            "id": t.get("id", ""),
+            "image": t.get("image", ""),
+            "ts": t.get("ts", 0),
+            "type": "track",
+        }
+
+    # Navidrome starred (best-effort; degrades to local-only)
+    try:
+        starred = await library.get_starred()
+    except Exception:
+        starred = []
+    for s in starred:
+        sid = s.get("id", "")
+        key = sid or f"{(s.get('artist') or '').lower().strip()}:{(s.get('name') or '').lower().strip()}"
+        if key in merged:
+            # Prefer Navidrome image/id but keep local ts for ordering
+            ts = merged[key].get("ts", 0)
+            merged[key] = {**s, "ts": ts}
+        else:
+            merged[key] = {**s, "ts": 0}
+
+    items = sorted(merged.values(), key=lambda x: x.get("ts", 0), reverse=True)
+    for it in items:
+        it.pop("ts", None)
+    return {"tracks": items}

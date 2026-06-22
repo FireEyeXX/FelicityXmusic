@@ -1,14 +1,17 @@
 import hashlib
+import logging
 import os
 import re
 import time
 import httpx
 
+logger = logging.getLogger(__name__)
+
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 SPOTIFY_REFRESH_TOKEN = os.environ.get("SPOTIFY_REFRESH_TOKEN", "")
 
-SPOTIFY_SCOPES = "user-library-read playlist-read-private playlist-read-collaborative user-follow-read"
+SPOTIFY_SCOPES = "user-library-read playlist-read-private playlist-read-collaborative user-follow-read user-top-read"
 
 
 def get_oauth_url(redirect_uri: str, state: str = "", client_id: str = "") -> str:
@@ -372,6 +375,60 @@ async def get_followed_artists(creds: dict | None = None) -> list[dict]:
     return artists
 
 
+async def get_top_tracks(time_range: str = "medium_term", limit: int = 50,
+                         creds: dict | None = None) -> list[dict]:
+    """Fetch user's top tracks via /me/top/tracks (requires user-top-read scope).
+    time_range: 'short_term' (~4 weeks), 'medium_term' (~6 months), 'long_term' (years)."""
+    tracks = []
+    try:
+        data = await spotify_get("me/top/tracks",
+                                 {"time_range": time_range, "limit": min(limit, 50)},
+                                 user=True, creds=creds)
+    except Exception as e:
+        logger.warning("Spotify top tracks failed (time_range=%s): %s", time_range, e)
+        return []
+    for t in data.get("items", []):
+        if not t or not t.get("id"):
+            continue
+        tracks.append({
+            "id": t["id"],
+            "name": t["name"],
+            "artist": ", ".join(a["name"] for a in t.get("artists", [])),
+            "album": t.get("album", {}).get("name", ""),
+            "image": _best_image(t.get("album", {}).get("images", [])),
+            "url": t["external_urls"].get("spotify", ""),
+            "duration_ms": t.get("duration_ms", 0),
+            "type": "track",
+        })
+    return tracks
+
+
+async def get_top_artists(time_range: str = "medium_term", limit: int = 50,
+                          creds: dict | None = None) -> list[dict]:
+    """Fetch user's top artists via /me/top/artists (requires user-top-read scope)."""
+    artists = []
+    try:
+        data = await spotify_get("me/top/artists",
+                                 {"time_range": time_range, "limit": min(limit, 50)},
+                                 user=True, creds=creds)
+    except Exception as e:
+        logger.warning("Spotify top artists failed (time_range=%s): %s", time_range, e)
+        return []
+    for a in data.get("items", []):
+        if not a or not a.get("id"):
+            continue
+        artists.append({
+            "id": a["id"],
+            "name": a["name"],
+            "artist": a["name"],
+            "image": _best_image(a.get("images", [])),
+            "url": a["external_urls"].get("spotify", ""),
+            "genres": a.get("genres", []),
+            "type": "artist",
+        })
+    return artists
+
+
 async def get_saved_shows(creds: dict | None = None) -> list[dict]:
     """Fetch user's saved podcast shows."""
     shows = []
@@ -516,7 +573,14 @@ async def get_recommendations(
         params["seed_artists"] = ",".join(seeds_a)
     try:
         data = await spotify_get("recommendations", params)
-    except Exception:
+    except httpx.HTTPStatusError as e:
+        # The /recommendations endpoint is deprecated and returns 404 for apps
+        # created after Nov 2024. Make the failure observable but still degrade.
+        logger.warning("Spotify recommendations failed (HTTP %s) — endpoint deprecated; degrading to []",
+                       e.response.status_code)
+        return []
+    except Exception as e:
+        logger.warning("Spotify recommendations failed: %s — degrading to []", e)
         return []
     results = []
     for t in data.get("tracks", []):
