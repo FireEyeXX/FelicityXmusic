@@ -8,7 +8,7 @@ import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
 import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
-import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
+import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
 import { getDjData } from './bpm.js';
 
 // ── Dual-deck Web Audio API crossfade engine with DJ mixing ──
@@ -33,6 +33,16 @@ function _cancelTempoRamp() {
     if (_tempoRamp.id) cancelAnimationFrame(_tempoRamp.id);
     _tempoRamp = null;
   }
+}
+
+// Central crossfade teardown — every abort path must clear ALL transition timers and
+// the beat-sync PLL, or an orphaned timer keeps writing playbackRate on a reused deck
+// (causes tempo drift / glitches). Call before starting a fresh load/crossfade.
+function _teardownCrossfade() {
+  clearTimeout(_crossfadeTimer);
+  clearInterval(_rateReturnTimer);
+  _cancelTempoRamp();
+  if (_beatSync) { _beatSync.stop(); _beatSync = null; }
 }
 let _beatSync = null;
 
@@ -118,10 +128,7 @@ function _startCrossfade(seekable = true) {
     resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
     _fadingOutDeck.pause();
     _fadingOutDeck.src = '';
-    clearTimeout(_crossfadeTimer);
-    clearInterval(_rateReturnTimer);
-    _cancelTempoRamp();
-    if (_beatSync) { _beatSync.stop(); _beatSync = null; }
+    _teardownCrossfade();
     _crossfading = false;
   }
 
@@ -443,7 +450,7 @@ export async function loadAndPlay() {
       if (_crossfading && _fadingOutDeck) {
         resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
         _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
-        clearTimeout(_crossfadeTimer); _crossfading = false;
+        _teardownCrossfade(); _crossfading = false;
       }
       const deck = currentDeck;
       _setDeckSrc(deck, getCachedUrl(cleanName, cleanArtist) || streamUrl);
@@ -591,13 +598,16 @@ async function _autoCastAndPlay(item, cleanName, cleanArtist) {
 // ── Next / Prev ──
 let _lastNextTime = 0;
 export function nextTrack(opts = {}) {
-  // Throttle: ignore if called again within 500ms (prevents chain-skip)
+  const reason = opts.reason || 'user';
+  // Throttle only rapid USER skips — never drop ended/auto/error advances (an auto
+  // crossfade or ended event must always advance, or the track stalls/never transitions).
   const now = Date.now();
-  if (now - _lastNextTime < 500) return;
-  _lastNextTime = now;
+  if (reason === 'user') {
+    if (now - _lastNextTime < 500) return;
+    _lastNextTime = now;
+  }
 
   // ── Record skip/accept for recommendation feedback (only on user-initiated skips) ──
-  const reason = opts.reason || 'user';
   if (reason === 'user' || reason === 'ended') {
     try {
       const cur = store.playerQueue[store.playerIndex];
@@ -651,6 +661,7 @@ function _nextTrackInQueue() {
     if (smartMode !== 'off' && _outDjData) {
       const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       if (smartIdx != null) {
+        markPlayed(store.playerIndex); // pickSmartNext is now side-effect-free; mark on real advance
         store.playerIndex = smartIdx;
         loadAndPlay();
         return;
@@ -709,6 +720,7 @@ function _nextTrackInQueue() {
 let _currentRecItem = null;
 export async function playRecTrack(item) {
   _currentRecItem = item;
+  _crossfadeTriggered = false; // fresh track — re-arm the auto-crossfade trigger
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
   $('#playerArtist').textContent = item.artist || '';
@@ -741,6 +753,7 @@ export async function playRecTrack(item) {
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {
       pausePrefetch();
+      _inDjData = null; // rec track has no analyzed DJ data — fall back to fixed-duration timing
       _startCrossfade();
       const nextDeck = _activeDeckEl(); // after swap
       _setDeckSrc(nextDeck, src);
@@ -749,7 +762,7 @@ export async function playRecTrack(item) {
       if (_crossfading && _fadingOutDeck) {
         resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
         _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
-        clearTimeout(_crossfadeTimer); _crossfading = false;
+        _teardownCrossfade(); _crossfading = false;
       }
       _setDeckSrc(curDeck, src);
       curDeck.play().catch(() => {});
@@ -1076,7 +1089,7 @@ export function init() {
           const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all';
           if (hasNext) {
             _crossfadeTriggered = true;
-            nextTrack();
+            nextTrack({ reason: 'auto' });
           }
         }
         if (remaining > triggerAt + 1) {

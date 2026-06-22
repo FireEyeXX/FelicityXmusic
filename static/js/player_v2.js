@@ -8,7 +8,7 @@ import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
 import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
-import { fetchDjData, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
+import { fetchDjData, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
 
 // ── Dual-deck Web Audio API crossfade engine with DJ mixing ──
 
@@ -593,6 +593,7 @@ function _nextTrackInQueue() {
     if (smartMode !== 'off' && _outDjData) {
       const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       if (smartIdx != null) {
+        markPlayed(store.playerIndex); // pickSmartNext is side-effect-free; mark on real advance
         store.playerIndex = smartIdx;
         loadAndPlay();
         return;

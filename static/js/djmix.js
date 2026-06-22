@@ -376,11 +376,11 @@ export function resetSmartQueuePlayed() { _playedIndices.clear(); }
 /** Mark current index as played */
 export function markPlayed(idx) { _playedIndices.add(idx); }
 
+// NOTE: side-effect-free — does NOT mutate _playedIndices, so it is safe to call for
+// prediction (prefetch) and again at commit without desyncing played-state. The caller
+// marks the outgoing track via markPlayed() only on a real advance.
 export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', repeatAll = false) {
   if (!currentDjData || !currentDjData.bpm) return null;
-
-  // Mark current as played
-  _playedIndices.add(currentIndex);
 
   const curBpm = currentDjData.bpm;
   const curCamelot = currentDjData.camelot;
