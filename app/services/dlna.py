@@ -1,12 +1,57 @@
 """DLNA/UPnP service: discover renderers on LAN and control playback."""
 
 import asyncio
+import ipaddress
 import logging
 import os
 import socket
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 logger = logging.getLogger("musicseeker.dlna")
+
+_MAX_SESSIONS = 50  # bound per-(user,device) cast sessions
+
+
+def _is_safe_renderer_url(url: str) -> bool:
+    """Validate an admin-set renderer URL: http(s) only, no link-local/metadata host.
+    Prevents the server being pointed at cloud-metadata or arbitrary internal services."""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+            if (ip.is_link_local or ip.is_multicast or ip.is_reserved
+                    or ip.is_unspecified or ip.is_loopback):
+                return False  # blocks 169.254.169.254 (metadata), loopback, etc.; LAN privates allowed
+        except ValueError:
+            pass  # a hostname, not a literal IP — allow (LAN DNS)
+        return True
+    except Exception:
+        return False
+
+
+_EXT_MIME = {"flac": "audio/flac", "mp3": "audio/mpeg", "opus": "audio/ogg",
+             "m4a": "audio/mp4", "wav": "audio/wav", "aiff": "audio/aiff", "aac": "audio/aac"}
+
+
+async def _resolve_cast_mime(name: str, artist: str) -> str:
+    """Best-effort MIME for the DIDL protocolInfo so renderers (Onkyo) don't reject a
+    stream whose advertised type doesn't match the bytes. Falls back to audio/flac.
+    Capped so a slow yt-dlp resolve can't starve the cast's Play-retry budget."""
+    try:
+        from app.services import player
+        res = await asyncio.wait_for(player.resolve_stream(name, artist), timeout=8)
+        if not res:
+            return "audio/flac"
+        if res["source"] == "local":
+            ext = res["path"].rsplit(".", 1)[-1].lower() if "." in res["path"] else ""
+            return _EXT_MIME.get(ext, "audio/flac")
+        if res["source"] == "navidrome":
+            return "audio/flac"   # cast uses quality=lossless → Navidrome serves FLAC
+        return "audio/mpeg"       # YouTube source is transcoded to MP3
+    except Exception:
+        return "audio/flac"
 
 # ── State ──
 _devices: dict[str, dict] = {}  # location_url -> {name, ip, location, udn, upnp_device}
@@ -71,6 +116,9 @@ async def start_discovery():
 
 
 async def _add_manual_renderer(url: str):
+    if not _is_safe_renderer_url(url):
+        logger.warning(f"DLNA: rejected unsafe renderer URL: {url}")
+        return
     try:
         factory = await _get_factory()
         if not factory:
@@ -163,27 +211,28 @@ async def scan_devices() -> list[dict]:
     factory = await _get_factory()
     sem = asyncio.Semaphore(50)  # High concurrency — probes are fast TCP connects
 
-    async def probe(ip: str, port: int, path: str):
-        url = f"http://{ip}:{port}{path}"
-        async with sem:
-            try:
-                async with httpx.AsyncClient(timeout=0.8) as client:
+    # One shared client for the whole sweep (was creating ~2000 clients, one per probe).
+    async with httpx.AsyncClient(timeout=0.8) as client:
+        async def probe(ip: str, port: int, path: str):
+            url = f"http://{ip}:{port}{path}"
+            async with sem:
+                try:
                     resp = await client.get(url)
                     if resp.status_code == 200 and "MediaRenderer" in resp.text:
                         return url
-            except Exception:
-                pass
-        return None
+                except Exception:
+                    pass
+            return None
 
-    # Probe IPs 1-254 on all port/path combos
-    tasks = []
-    for i in range(1, 255):
-        ip = f"{gateway_ip}.{i}"
-        for port in ports:
-            for path in paths:
-                tasks.append(probe(ip, port, path))
+        # Probe IPs 1-254 on all port/path combos
+        tasks = []
+        for i in range(1, 255):
+            ip = f"{gateway_ip}.{i}"
+            for port in ports:
+                for path in paths:
+                    tasks.append(probe(ip, port, path))
 
-    results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
     urls = [r for r in results if r]
 
     # Deduplicate by host
@@ -221,6 +270,9 @@ async def scan_devices() -> list[dict]:
 def _get_session(session_key: str) -> dict:
     """Get or create a per-device cast session."""
     if session_key not in _sessions:
+        # Bound the map — evict the oldest-inserted session if at the cap.
+        if len(_sessions) >= _MAX_SESSIONS:
+            _sessions.pop(next(iter(_sessions)), None)
         _sessions[session_key] = {
             "dmr": None,
             "device": None,
@@ -258,14 +310,13 @@ async def cast_to_device(session_key: str, device_id: str, name: str, artist: st
             return False
 
         try:
-            from async_upnp_client.aiohttp import AiohttpRequester
-            from async_upnp_client.client_factory import UpnpFactory
             from async_upnp_client.profiles.dlna import DmrDevice
 
-            # Reuse DMR for same device, create fresh only if device changed
+            # Reuse DMR for same device, create fresh only if device changed.
+            # Use the shared factory/requester (was creating a new AiohttpRequester per
+            # cast → leaked an aiohttp ClientSession on every device change).
             if not session["dmr"] or session["device"] != device:
-                requester = AiohttpRequester()
-                factory = UpnpFactory(requester)
+                factory = await _get_factory()
                 upnp_device = await asyncio.wait_for(
                     factory.async_create_device(device["location"]), timeout=10
                 )
@@ -276,8 +327,9 @@ async def cast_to_device(session_key: str, device_id: str, name: str, artist: st
                 return False
 
             base = _get_server_url()
+            mime = await _resolve_cast_mime(name, artist)
             stream_url = f"{base}/api/player/stream?name={quote(name)}&artist={quote(artist)}&token={quote(token)}&quality=lossless"
-            metadata = _build_didl_metadata(name, artist, album, image, duration_ms, stream_url)
+            metadata = _build_didl_metadata(name, artist, album, image, duration_ms, stream_url, mime)
 
             # Per UPnP spec: SetAVTransportURI works in any state (including PLAYING)
             # No need to Stop first — the renderer handles the transition internally
@@ -314,9 +366,12 @@ async def cast_to_device(session_key: str, device_id: str, name: str, artist: st
             return True
         except Exception as e:
             import traceback
-            session["transitioning"] = False
             logger.error(f"DLNA cast error: {e}\n{traceback.format_exc()}")
             return False
+        finally:
+            # Never leave the session wedged in TRANSITIONING (e.g. on task cancellation).
+            if session.get("generation") == my_gen:
+                session["transitioning"] = False
 
 
 async def play(session_key: str) -> bool:
@@ -326,7 +381,8 @@ async def play(session_key: str) -> bool:
     try:
         await session["dmr"].async_play()
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DLNA play error: {e}")
         return False
 
 
@@ -337,7 +393,8 @@ async def pause(session_key: str) -> bool:
     try:
         await session["dmr"].async_pause()
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DLNA pause error: {e}")
         return False
 
 
@@ -350,8 +407,10 @@ async def stop(session_key: str) -> bool:
         await session["dmr"].async_stop()
         session["device"] = None
         session["dmr"] = None
+        _sessions.pop(session_key, None)  # evict — don't accumulate dead sessions
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DLNA stop error: {e}")
         return False
 
 
@@ -377,7 +436,10 @@ async def seek(session_key: str, position_seconds: float) -> bool:
                       dmr.device.services.get("urn:schemas-upnp-org:service:AVTransport:1")
                 if srv:
                     action = srv.action("Seek")
-                    await action.async_call(InstanceID=0, Unit="ABS_TIME", Target=target)
+                    try:
+                        await action.async_call(InstanceID=0, Unit="ABS_TIME", Target=target)
+                    except Exception:
+                        await action.async_call(InstanceID=0, Unit="REL_TIME", Target=target)
                 else:
                     return False
         return True
@@ -393,7 +455,8 @@ async def set_volume(session_key: str, volume: int) -> bool:
     try:
         await session["dmr"].async_set_volume_level(volume / 100.0)
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DLNA set_volume error: {e}")
         return False
 
 
@@ -478,7 +541,7 @@ async def get_status(session_key: str) -> dict | None:
 
 
 def _build_didl_metadata(title: str, artist: str, album: str, image: str,
-                          duration_ms: int, stream_url: str) -> str:
+                          duration_ms: int, stream_url: str, mime: str = "audio/flac") -> str:
     dur_str = ""
     if duration_ms > 0:
         s = duration_ms // 1000
@@ -495,7 +558,7 @@ def _build_didl_metadata(title: str, artist: str, album: str, image: str,
     <upnp:artist>{escape(artist)}</upnp:artist>
     <upnp:album>{escape(album)}</upnp:album>
     {f'<upnp:albumArtURI>{escape(image)}</upnp:albumArtURI>' if image else ''}
-    <res protocolInfo="http-get:*:audio/flac:*"{f' duration="{dur_str}"' if dur_str else ''}>{escape(stream_url)}</res>
+    <res protocolInfo="http-get:*:{mime}:*"{f' duration="{dur_str}"' if dur_str else ''}>{escape(stream_url)}</res>
   </item>
 </DIDL-Lite>'''
     return meta

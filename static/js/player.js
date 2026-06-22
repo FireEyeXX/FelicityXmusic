@@ -102,7 +102,7 @@ export async function loadAndPlay() {
     };
     apiJson('/api/dlna/cast', { method: 'POST', body: castBody })
       .then(() => { /* cast started */ })
-      .catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; });
+      .catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; _castSkipAutoAdvance = false; });
   } else {
     let cached = getCachedUrl(cleanName, cleanArtist);
     // If prefetch is downloading this track, wait for it (avoids competing parallel stream)
@@ -217,6 +217,8 @@ let _castLastState = '';
 let _castLastDur = 0;     // last non-zero duration seen while casting (renderers zero it at STOP)
 let _castLastPos = 0;     // last non-zero position seen while casting
 let _castWasPlaying = false; // latched true while playing; survives the TRANSITIONING blip before STOP
+let _castPollFails = 0;      // consecutive cast-status poll failures (teardown after a few)
+let _castVolTimer = null;    // debounce timer for the cast volume slider
 let _castSkipAutoAdvance = false;
 let _castTransitioning = false;
 let _castTransitionTimer = null;
@@ -352,7 +354,7 @@ export function playRecTrack(item) {
     apiJson('/api/dlna/cast', { method: 'POST', body: {
       device_id: store.castDevice.id, name: cleanName, artist: cleanArtist,
       album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,
-    }}).catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; });
+    }}).catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; _castSkipAutoAdvance = false; });
   } else {
     const cached = getCachedUrl(cleanName, cleanArtist);
     if (cached) {
@@ -710,7 +712,7 @@ export function init() {
         _castToDevice(devices[0]);
       } else {
         // Try to match saved dlna_renderer_url from settings
-        const savedUrl = store.appSettings.dlna_renderer_url || '';
+        const savedUrl = store.deviceDlnaRendererUrl || store.appSettings.dlna_renderer_url || '';
         const savedDevice = savedUrl ? devices.find(d => d.location === savedUrl) : null;
         if (savedDevice) {
           _castToDevice(savedDevice);
@@ -734,7 +736,8 @@ export function init() {
       const label = $('#fpCastVolLabel');
       if (label) label.textContent = vol + '%';
       if (store.castDevice) {
-        apiJson('/api/dlna/volume', { method: 'POST', body: { volume: vol } }).catch(() => {});
+        clearTimeout(_castVolTimer);
+        _castVolTimer = setTimeout(() => { if (store.castDevice) apiJson('/api/dlna/volume', { method: 'POST', body: { volume: vol } }).catch(() => {}); }, 150);
       }
     });
   }
@@ -777,8 +780,15 @@ export function init() {
     _castLastDur = 0;
     _castLastPos = 0;
     _castWasPlaying = false;
+    _castPollFails = 0;
     store.castPollTimer = setInterval(async () => {
       if (!store.castDevice) { clearInterval(store.castPollTimer); return; }
+      if (store.deviceOutputMode === 'local') {
+        // User switched to local output mid-cast — stop the renderer and end the poll.
+        store.castDevice = null; _syncCastButtons(''); clearInterval(store.castPollTimer);
+        apiJson('/api/dlna/stop', { method: 'POST' }).catch(() => {});
+        return;
+      }
       try {
         const status = await apiJson('/api/dlna/status');
         if (status.stale) return; // transient backend query failure — skip tick, keep last state
@@ -832,7 +842,14 @@ export function init() {
           nextTrack();
         }
         _castLastState = state;
-      } catch {}
+        _castPollFails = 0;
+      } catch {
+        // Tolerate transient status errors; tear down only after sustained failure.
+        if (++_castPollFails >= 5) {
+          _castPollFails = 0; store.castDevice = null; _syncCastButtons('');
+          clearInterval(store.castPollTimer);
+        }
+      }
     }, 2000);
   }
 

@@ -51,11 +51,18 @@ async def cast_to_device(req: CastRequest, request: Request, user: dict = Depend
     # Stream-scoped, short-lived token — this token is sent cleartext to the UPnP
     # renderer and embedded in DIDL metadata, so it must NOT be the full session JWT.
     token = auth.create_stream_token(user["username"], ttl=24 * 3600)
-    # Non-blocking: cast runs in background, UI doesn't freeze
-    asyncio.create_task(dlna.cast_to_device(
-        sk, req.device_id, req.name, req.artist, token,
-        album=req.album, image=req.image, duration_ms=req.duration_ms,
-    ))
+    # Await the cast so a failure is surfaced to the client — fire-and-forget meant a
+    # failed cast (incl. an auto-advance re-cast) silently stalled the queue. Bounded by
+    # the per-call renderer timeouts inside cast_to_device (+ a hard ceiling here).
+    try:
+        ok = await asyncio.wait_for(dlna.cast_to_device(
+            sk, req.device_id, req.name, req.artist, token,
+            album=req.album, image=req.image, duration_ms=req.duration_ms,
+        ), timeout=40)
+    except asyncio.TimeoutError:
+        ok = False
+    if not ok:
+        raise HTTPException(502, "Cast failed")
     return {"status": "casting"}
 
 
