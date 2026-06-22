@@ -179,6 +179,23 @@
     </div>
     <div id="artistAlbums" class="grid"></div>
   </div>
+  <div id="albumDetail" style="display:none; margin-top:24px;">
+    <button id="backFromAlbum" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
+    <div class="playlist-hero">
+      <img id="albumDetailImg" class="playlist-hero-img" src="">
+      <div class="playlist-hero-info">
+        <h2 id="albumDetailName"></h2>
+        <p id="albumDetailArtist" style="color:var(--text-muted); font-size:13px;"></p>
+        <p id="albumDetailCount"></p>
+      </div>
+      <div class="playlist-hero-actions">
+        <button class="btn-download" id="playAlbum" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
+        <button class="btn-download" id="queueAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Add All</button>
+        <button class="btn-download" id="downloadAlbum" style="width:auto; padding:12px 28px;">Download All</button>
+      </div>
+    </div>
+    <div id="albumTracks" class="grid"></div>
+  </div>
 </main>
 
 <!-- ── Discover Page ── -->

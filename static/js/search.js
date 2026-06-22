@@ -4,7 +4,7 @@ import { store } from './store.js';
 import { $, $$, esc, formatDuration } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
-import { loadPlaylistDetail, loadShowDetail, loadArtistDetail } from './spotify.js';
+import { loadPlaylistDetail, loadShowDetail, loadArtistDetail, loadAlbumDetail } from './spotify.js';
 import { attachContextMenu, wasLongPress } from './contextmenu.js';
 
 // ── Card Helper Functions ──
@@ -82,6 +82,8 @@ export function renderResults(items, container, fromPage) {
         loadShowDetail(item.id, item.url, fromPage, item.feed_url);
       } else if (item.type === 'artist' && item.id) {
         loadArtistDetail(item.id, fromPage);
+      } else if (item.type === 'album' && item.id) {
+        loadAlbumDetail(item, fromPage);
       } else {
         openModal(item);
       }
@@ -215,6 +217,8 @@ export async function doSearch(append) {
             loadShowDetail(item.id, item.url, 'search', item.feed_url);
           } else if (item.type === 'artist' && item.id) {
             loadArtistDetail(item.id, 'search');
+          } else if (item.type === 'album' && item.id) {
+            loadAlbumDetail(item, 'search');
           } else {
             openModal(item);
           }

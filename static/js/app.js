@@ -4,24 +4,13 @@
 import { init as initAuth } from './auth.js';
 import { init as initRouter, registerPageLoader, setCloseHandlers } from './router.js';
 import { init as initSearch } from './search.js';
-import { init as initSpotify, loadPlaylists, closePlaylistDetail, closeShowDetail, closeArtistDetail } from './spotify.js';
+import { init as initSpotify, loadPlaylists, closePlaylistDetail, closeShowDetail, closeArtistDetail, closeAlbumDetail } from './spotify.js';
 import { init as initDiscover, loadTags, closeTagDetail } from './discover.js';
 import { init as initDownloads } from './downloads.js';
-// Dynamic player engine selection (classic or crossfade) — fallback to classic on error
-let _playerModule;
-try {
-  const _playerEngine = localStorage.getItem('ms_player_engine') || 'classic';
-  if (_playerEngine === 'dj') {
-    _playerModule = await import('./player_v3.js');
-  } else if (_playerEngine === 'crossfade') {
-    _playerModule = await import('./player_v2.js');
-  } else {
-    _playerModule = await import('./player.js');
-  }
-} catch (e) {
-  console.error('Player engine load failed, falling back to classic:', e);
-  _playerModule = await import('./player.js');
-}
+// Dynamic player engine selection (classic/crossfade/dj) — resolved via player_active.js
+// so every cross-module caller shares this exact engine instance.
+import { getPlayerModule } from './player_active.js';
+const _playerModule = await getPlayerModule();
 const { init: initPlayer, loadAndPlay, hidePlayerBar, saveQueueDebounced, nextTrack, prevTrack, updatePlayPauseIcon, audio, getAudio } = _playerModule;
 import { init as initQueue, setPlayerRefs as setQueuePlayerRefs } from './queue.js';
 import { init as initFullPlayer, setPlayerRefs as setFpPlayerRefs } from './fullplayer.js';
@@ -50,6 +39,7 @@ setCloseHandlers({
   closePodcastShow,
   closeTagDetail,
   closeArtistDetail,
+  closeAlbumDetail,
   closeLibraryDetail,
 });
 

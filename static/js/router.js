@@ -77,7 +77,7 @@ function handleClickableSearch(e) {
 // ── Close sub-pages ──
 // These are imported from their respective modules for popstate handling
 
-let closePlaylistDetail, closeShowDetail, closePodcastShow, closeTagDetail, closeArtistDetail, closeLibraryDetail;
+let closePlaylistDetail, closeShowDetail, closePodcastShow, closeTagDetail, closeArtistDetail, closeAlbumDetail, closeLibraryDetail;
 
 export function setCloseHandlers(handlers) {
   closePlaylistDetail = handlers.closePlaylistDetail;
@@ -85,6 +85,7 @@ export function setCloseHandlers(handlers) {
   closePodcastShow = handlers.closePodcastShow;
   closeTagDetail = handlers.closeTagDetail;
   closeArtistDetail = handlers.closeArtistDetail;
+  closeAlbumDetail = handlers.closeAlbumDetail;
   closeLibraryDetail = handlers.closeLibraryDetail;
 }
 
@@ -107,6 +108,7 @@ function handlePopstate(e) {
   if ($('#podcastEpisodes').style.display !== 'none' && closePodcastShow) { closePodcastShow(true); return; }
   if ($('#tagDetailView').style.display !== 'none' && closeTagDetail) { closeTagDetail(true); return; }
   if ($('#artistDetail').style.display !== 'none' && closeArtistDetail) { closeArtistDetail(true); return; }
+  if ($('#albumDetail') && $('#albumDetail').style.display !== 'none' && closeAlbumDetail) { closeAlbumDetail(true); return; }
   if ($('#libraryDetail') && $('#libraryDetail').style.display !== 'none' && closeLibraryDetail) { closeLibraryDetail(true); return; }
   // Guard: prevent exiting the app
   if (!state || state.guard) {

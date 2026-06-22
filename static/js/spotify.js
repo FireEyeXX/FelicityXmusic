@@ -7,6 +7,7 @@ import { openModal } from './downloads.js';
 import { renderResults, checkLibrary } from './search.js';
 import { switchPage } from './router.js';
 import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { getPlayerModule } from './player_active.js';
 
 // ── Tab Switching ──
 function loadSpTab(tab) {
@@ -262,7 +263,8 @@ export async function loadArtistDetail(id, fromPage) {
         if (wasLongPress()) return;
         if (e.target.closest('.card-dl-btn')) return;
         const album = store.currentArtistAlbums[card.dataset.albumIdx];
-        if (album) openModal(album);
+        if (album && album.id) loadAlbumDetail({ ...album, type: 'album', artist: $('#artistDetailName').textContent }, 'search');
+        else if (album) openModal(album);
       });
     });
     attachContextMenu(albumsEl, {
@@ -309,6 +311,47 @@ export function closeArtistDetail(fromPopstate) {
   $('#searchLoadMore').style.display = '';
   const src = store.artistDetailSource;
   store.artistDetailSource = null;
+  if (src) switchPage(src, true);
+  if (!fromPopstate) historyBack();
+}
+
+// ── Album Detail ──
+export async function loadAlbumDetail(album, fromPage) {
+  store.albumDetailSource = fromPage || null;
+  store.currentAlbum = album;
+  // Hide all known siblings; back will restore via switchPage or popstate
+  $('#searchResults').style.display = 'none';
+  $('#searchLoadMore').style.display = 'none';
+  if ($('#artistDetail')) $('#artistDetail').style.display = 'none';
+  $('#albumDetail').style.display = '';
+  history.pushState({ layer: 'albumDetail' }, '');
+  const tracksEl = $('#albumTracks');
+  tracksEl.innerHTML = Array(8).fill('<div class="skeleton skeleton-card"></div>').join('');
+  $('#albumDetailImg').src = album.image || '';
+  $('#albumDetailName').textContent = album.name || '';
+  $('#albumDetailArtist').textContent = album.artist || '';
+  $('#albumDetailCount').textContent = '';
+  try {
+    const data = await apiJson(`/api/album/${album.id}/tracks`);
+    const tracks = (data.tracks || []).map(t => ({
+      ...t, type: 'track',
+      album: album.name || t.album || '',
+      image: t.image || album.image || '',
+    }));
+    store.currentAlbumTracks = tracks;
+    $('#albumDetailCount').textContent = `${tracks.length} tracks`;
+    renderResults(tracks, '#albumTracks');
+  } catch (e) {
+    tracksEl.innerHTML = `<div class="empty-state"><p>Failed to load tracks: ${e.message}</p></div>`;
+  }
+}
+
+export function closeAlbumDetail(fromPopstate) {
+  $('#albumDetail').style.display = 'none';
+  $('#searchResults').style.display = '';
+  $('#searchLoadMore').style.display = '';
+  const src = store.albumDetailSource;
+  store.albumDetailSource = null;
   if (src) switchPage(src, true);
   if (!fromPopstate) historyBack();
 }
@@ -372,6 +415,25 @@ export function init() {
 
   $('#backFromArtist').addEventListener('click', () => closeArtistDetail());
 
+  // Album detail
+  $('#backFromAlbum').addEventListener('click', () => closeAlbumDetail());
+  $('#playAlbum').addEventListener('click', async () => {
+    const tracks = store.currentAlbumTracks || [];
+    if (!tracks.length) return;
+    const { playTracks } = await import('./upnext.js');
+    playTracks(tracks);
+  });
+  $('#queueAlbum').addEventListener('click', async () => {
+    const tracks = store.currentAlbumTracks || [];
+    if (!tracks.length) return;
+    const mod = await getPlayerModule();
+    mod.addToQueue(tracks);
+  });
+  $('#downloadAlbum').addEventListener('click', () => {
+    if (!store.currentAlbum) return;
+    openModal({ ...store.currentAlbum, type: 'album' });
+  });
+
   // Note: #followArtist and #radioArtist buttons are created by radio.js init()
   // and their click handlers are attached there.
 
@@ -414,7 +476,7 @@ export function init() {
   $('#queuePlaylist').addEventListener('click', () => {
     const tracks = getPlaylistTracksForPlayer();
     if (tracks.length) {
-      import('./player.js').then(m => m.addToQueue(tracks));
+      getPlayerModule().then(m => m.addToQueue(tracks));
     }
   });
 }
