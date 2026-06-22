@@ -372,12 +372,17 @@ function _playNow(item) {
 }
 
 function _playNext(item) {
-  // Insert at current index + 1
-  const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
+  // Insert at current index + 1 — or play now if nothing is currently playing.
+  const playing = store.playerIndex >= 0;
+  const idx = (playing ? store.playerIndex : -1) + 1;
   store.playerQueue.splice(idx, 0, item);
   import('./queue.js').then(m => m.renderQueue());
-  getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
-  showToast('Will play next');
+  if (!playing) store.playerIndex = idx;
+  getPlayerModule().then(m => {
+    if (!playing && m.loadAndPlay) m.loadAndPlay();
+    m.saveQueueDebounced && m.saveQueueDebounced();
+  });
+  showToast(playing ? 'Will play next' : 'Playing');
 }
 
 function _playQueueIndex(idx) {

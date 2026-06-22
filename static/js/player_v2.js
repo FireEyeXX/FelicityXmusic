@@ -540,13 +540,16 @@ async function _autoCastAndPlay(item, cleanName, cleanArtist) {
 // ── Next / Prev ──
 let _lastNextTime = 0;
 export function nextTrack(opts = {}) {
-  // Throttle: ignore if called again within 2s (prevents chain-skip)
+  const reason = opts.reason || 'user';
+  // Throttle only rapid USER skips — never drop ended/auto/error advances (an auto
+  // crossfade or ended event must always advance, or the track stalls).
   const now = Date.now();
-  if (now - _lastNextTime < 500) return;
-  _lastNextTime = now;
+  if (reason === 'user') {
+    if (now - _lastNextTime < 500) return;
+    _lastNextTime = now;
+  }
 
   // ── Record skip/accept for recommendation feedback (only on user/end paths) ──
-  const reason = opts.reason || 'user';
   if (reason === 'user' || reason === 'ended') {
     try {
       const cur = store.playerQueue[store.playerIndex];
@@ -1015,7 +1018,7 @@ export function init() {
           const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all';
           if (hasNext) {
             _crossfadeTriggered = true;
-            nextTrack();
+            nextTrack({ reason: 'auto' });
           }
         }
         if (remaining > triggerAt + 1) {

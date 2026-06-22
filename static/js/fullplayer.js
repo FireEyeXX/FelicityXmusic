@@ -95,6 +95,23 @@ export function init() {
   // Now Playing bottom nav button
   $('#bnavNowPlaying').addEventListener('click', openFullPlayer);
 
+  // Swipe up on the mini player bar → open the full player (migrated from gestures.js,
+  // which was removed; this is the one gesture it had that wasn't already here).
+  (function () {
+    const bar = document.getElementById('playerBar');
+    if (!bar) return;
+    let sy = 0, tracking = false;
+    bar.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      sy = e.touches[0].clientY; tracking = true;
+    }, { passive: true });
+    bar.addEventListener('touchmove', (e) => {
+      if (tracking && sy - e.touches[0].clientY > 40) { tracking = false; openFullPlayer(); }
+    }, { passive: true });
+    bar.addEventListener('touchend', () => { tracking = false; }, { passive: true });
+    bar.addEventListener('touchcancel', () => { tracking = false; }, { passive: true });
+  })();
+
   // Full player close button
   $('#fpClose').addEventListener('click', () => closeFullPlayer());
 

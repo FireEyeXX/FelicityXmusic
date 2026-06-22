@@ -329,11 +329,16 @@ function _buildMultiSelectMenu(playlistId, playlistName) {
       {
         label: 'Play next', icon: '&#8595;',
         onClick: () => {
-          const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
+          const playing = store.playerIndex >= 0;
+          const idx = (playing ? store.playerIndex : -1) + 1;
           store.playerQueue.splice(idx, 0, ...selectedItems);
           import('./queue.js').then(m => m.renderQueue());
-          getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
-          showToast(`${count} tracks will play next`);
+          if (!playing) store.playerIndex = idx;
+          getPlayerModule().then(m => {
+            if (!playing && m.loadAndPlay) m.loadAndPlay();
+            m.saveQueueDebounced && m.saveQueueDebounced();
+          });
+          showToast(playing ? `${count} tracks will play next` : 'Playing');
         },
       },
       {

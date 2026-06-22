@@ -145,7 +145,10 @@ export async function initApp() {
     store.streamTokenInterval = setInterval(refreshStreamToken, 5 * 3600 * 1000);
 
     // Restore player queue + initialize Up Next temp playlist (unified queue model)
-    getPlayerModule().then(m => m.loadQueueState());
+    // Sequence restore: load the saved queue/index BEFORE Up Next's empty-queue
+    // hydration decides whether to overwrite it (was a non-deterministic boot race
+    // that could clobber the restored track/position).
+    await getPlayerModule().then(m => m.loadQueueState());
     initUpNext().catch(() => {});
 
     // Load favorited artist IDs

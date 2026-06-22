@@ -107,7 +107,7 @@ export async function loadAndPlay() {
     let cached = getCachedUrl(cleanName, cleanArtist);
     // If prefetch is downloading this track, wait for it (avoids competing parallel stream)
     if (!cached && localStorage.getItem('ms_prefetch_enabled') !== '0') {
-      const waited = await waitForCache(cleanName, cleanArtist, 8000);
+      const waited = await waitForCache(cleanName, cleanArtist, 2000);
       if (waited) cached = waited;
     }
     if (cached) {
@@ -493,7 +493,12 @@ export async function loadQueueState() {
         audio.src = `/api/player/stream?${params}`;
         audio.preload = 'none';
         if (data.position_seconds > 0) {
-          audio.addEventListener('loadedmetadata', () => { audio.currentTime = data.position_seconds; }, { once: true });
+          const restoreSrc = audio.src;
+          audio.addEventListener('loadedmetadata', () => {
+            // Only seek if still the restored track — the user may have switched tracks
+            // before this one-shot metadata load fired.
+            if (audio.src === restoreSrc) audio.currentTime = data.position_seconds;
+          }, { once: true });
         }
         syncFullPlayer();
         updateDownloadButtons(item);
