@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { $, fmtTime, showToast, historyBack } from './utils.js';
 import { apiJson } from './api.js';
 import { renderQueueInto, renderQueue, openFpQueuePanel, closeFpQueuePanel, closeQueuePanel, scrollToNowPlaying } from './queue.js';
+import { toggleLike, isLiked } from './likes.js';
 
 // Forward references set during init to avoid circular imports
 let nextTrack, prevTrack, loadAndPlay, hidePlayerBar, saveQueueDebounced, updatePlayPauseIcon;
@@ -25,6 +26,99 @@ export function setPlayerRefs(refs) {
   _audioGetter = refs.getAudio || null;
 }
 
+// ── Shared player-mode toggles (engine-agnostic: drive store, sync both UIs) ──
+// Behavior mirrors the original full-player handlers; the active engine reads
+// store.shuffleEnabled / store.repeatMode, so flipping the store is sufficient.
+export function toggleShuffle() {
+  store.shuffleEnabled = !store.shuffleEnabled;
+  syncShuffleRepeatUI();
+}
+
+export function toggleRepeat() {
+  const modes = ['off', 'all', 'one'];
+  store.repeatMode = modes[(modes.indexOf(store.repeatMode) + 1) % 3];
+  syncShuffleRepeatUI();
+}
+
+export function syncShuffleRepeatUI() {
+  for (const id of ['#fpShuffle', '#playerShuffle']) {
+    const b = $(id);
+    if (b) b.classList.toggle('active', store.shuffleEnabled);
+  }
+  const repeatTitle = store.repeatMode === 'off' ? 'Repeat off'
+    : store.repeatMode === 'all' ? 'Repeat all' : 'Repeat one';
+  for (const [btnId, badgeId] of [['#fpRepeat', '#fpRepeatBadge'], ['#playerRepeat', '#playerRepeatBadge']]) {
+    const btn = $(btnId);
+    if (!btn) continue;
+    btn.classList.toggle('active', store.repeatMode !== 'off');
+    btn.title = repeatTitle;
+    const badge = $(badgeId);
+    if (badge) badge.textContent = store.repeatMode === 'one' ? '1' : '';
+  }
+}
+
+// ── Mute toggle ──
+let _preMuteVolume = null;
+
+function _applyVolume(vol) {
+  store.playerVolume = vol;
+  const pct = Math.round(vol * 100);
+  const pv = $('#playerVolume'); if (pv) pv.value = pct;
+  const fv = $('#fpVolume'); if (fv) fv.value = pct;
+  if (store.castDevice) {
+    apiJson('/api/dlna/volume', { method: 'POST', body: { volume: pct } }).catch(() => {});
+  } else {
+    const a = audio(); if (a) a.volume = vol;
+  }
+}
+
+export function toggleMute() {
+  if (store.playerVolume > 0) {
+    _preMuteVolume = store.playerVolume;
+    _applyVolume(0);
+  } else {
+    _applyVolume(_preMuteVolume && _preMuteVolume > 0 ? _preMuteVolume : 1);
+  }
+  syncMuteUI();
+}
+
+const _ICON_SPEAKER = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>';
+const _ICON_MUTED = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>';
+
+export function syncMuteUI() {
+  const muted = store.playerVolume <= 0;
+  for (const [iconId, btnId] of [['#playerMuteIcon', '#playerMute'], ['#fpMuteIcon', '#fpMute']]) {
+    const icon = $(iconId);
+    if (icon) icon.innerHTML = muted ? _ICON_MUTED : _ICON_SPEAKER;
+    const btn = $(btnId);
+    if (btn) btn.title = muted ? 'Unmute' : 'Mute';
+  }
+}
+
+// ── Like toggle (player bar + full player) ──
+// Engine-agnostic: reads the now-playing item straight from the store and the
+// likes.js in-memory set, so it works no matter which player engine is active.
+const _LIKE_FILLED = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 21s-7.5-4.9-10-9.2C.6 9.1 1.6 5.5 5 4.6c2-.5 3.9.5 5 2 1.1-1.5 3-2.5 5-2 3.4.9 4.4 4.5 3 7.2C19.5 16.1 12 21 12 21z"/></svg>';
+const _LIKE_OUTLINE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 20s-6.8-4.5-9.1-8.4C1.5 9 2.4 5.9 5.3 5.1c1.8-.5 3.6.4 4.7 1.9 1.1-1.5 2.9-2.4 4.7-1.9 2.9.8 3.8 3.9 2.4 6.5C18.8 15.5 12 20 12 20z"/></svg>';
+
+export function syncLikeUI() {
+  const item = _currentItem();
+  const liked = !!item && isLiked(item);
+  for (const id of ['#playerLike', '#fpLike']) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.innerHTML = liked ? _LIKE_FILLED : _LIKE_OUTLINE;
+    btn.classList.toggle('liked', liked);
+    btn.setAttribute('aria-pressed', liked ? 'true' : 'false');
+    btn.title = liked ? 'Remove from Liked Songs' : 'Add to Liked Songs';
+  }
+}
+
+function _toggleCurrentLike() {
+  const item = _currentItem();
+  if (item) toggleLike(item);
+}
+
 // ── Sync Full Player ──
 export function syncFullPlayer() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
@@ -44,6 +138,11 @@ export function syncFullPlayer() {
   // Sync volume
   const fpVol = $('#fpVolume');
   if (fpVol) fpVol.value = Math.round(store.playerVolume * 100);
+  // Keep shuffle/repeat/mute icons (mini bar + full player) reflecting real store state
+  // on every track change — they live in `store`, but the glyphs need re-painting.
+  syncShuffleRepeatUI();
+  syncMuteUI();
+  syncLikeUI();
 }
 
 // ── Open/Close Full Player ──
@@ -86,11 +185,47 @@ export function closeFullPlayer(fromPopstate) {
   if (!fromPopstate) historyBack();
 }
 
+// Current now-playing item (or null).
+function _currentItem() {
+  return (store.playerIndex >= 0 && store.playerIndex < store.playerQueue.length)
+    ? store.playerQueue[store.playerIndex] : null;
+}
+
 // ── Init ──
 export function init() {
   // Open full player by clicking mini player img/text
   $('#playerImg').addEventListener('click', openFullPlayer);
   $('.player-text').addEventListener('click', openFullPlayer);
+
+  // ── Now-playing navigation (clickable artist/art) ──
+  // Reuse the context-menu "Show artist" / "Show album" navigation so behavior
+  // matches the rest of the app. stopPropagation prevents the parent handlers
+  // (open-full-player / full-player swipe-to-close) from also firing.
+  const _navArtist = (e) => {
+    const item = _currentItem();
+    if (!item || !item.artist) return;
+    e.stopPropagation();
+    import('./contextmenu.js').then(m => m.openArtistByName(item.artist));
+  };
+  const _navAlbum = (e) => {
+    const item = _currentItem();
+    if (!item) return;
+    e.stopPropagation();
+    import('./contextmenu.js').then(m => {
+      if (item.album) m.openAlbumByName(item.album);
+      else if (item.artist) m.openArtistByName(item.artist);
+    });
+  };
+  // Mini player bar: artist text → artist. (The art keeps opening the full
+  // player, which itself exposes artist/album navigation.)
+  const playerArtist = $('#playerArtist');
+  if (playerArtist) { playerArtist.style.cursor = 'pointer'; playerArtist.addEventListener('click', _navArtist); }
+  // Full player: artist → artist, title → album. (The art keeps its existing
+  // tap=play/pause + swipe=next/prev gestures, so navigation lives on the text.)
+  const fpArtist = $('#fpArtist');
+  if (fpArtist) { fpArtist.style.cursor = 'pointer'; fpArtist.addEventListener('click', _navArtist); }
+  const fpTitle = $('#fpTitle');
+  if (fpTitle) { fpTitle.style.cursor = 'pointer'; fpTitle.addEventListener('click', _navAlbum); }
 
   // Now Playing bottom nav button
   $('#bnavNowPlaying').addEventListener('click', openFullPlayer);
@@ -174,6 +309,7 @@ export function init() {
     } else {
       audio().volume = store.playerVolume;
     }
+    syncMuteUI();
   });
 
   // Full player download
@@ -204,11 +340,11 @@ export function init() {
     }
   });
 
-  // Shuffle toggle
-  $('#fpShuffle').addEventListener('click', () => {
-    store.shuffleEnabled = !store.shuffleEnabled;
-    $('#fpShuffle').classList.toggle('active', store.shuffleEnabled);
-  });
+  // Shuffle toggle — flips store (engine reads store.shuffleEnabled) and syncs
+  // both the full-player and mini-bar buttons so they stay identical.
+  $('#fpShuffle').addEventListener('click', toggleShuffle);
+  const playerShuffle = $('#playerShuffle');
+  if (playerShuffle) playerShuffle.addEventListener('click', toggleShuffle);
 
   // DJ Mode toggle (only visible when crossfade engine is active)
   const djBtn = $('#fpDjMode');
@@ -232,15 +368,28 @@ export function init() {
   }
 
   // Repeat toggle: off -> all -> one -> off
-  $('#fpRepeat').addEventListener('click', () => {
-    const modes = ['off', 'all', 'one'];
-    store.repeatMode = modes[(modes.indexOf(store.repeatMode) + 1) % 3];
-    const btn = $('#fpRepeat');
-    const badge = $('#fpRepeatBadge');
-    btn.classList.toggle('active', store.repeatMode !== 'off');
-    badge.textContent = store.repeatMode === 'one' ? '1' : '';
-    btn.title = store.repeatMode === 'off' ? 'Repeat off' : store.repeatMode === 'all' ? 'Repeat all' : 'Repeat one';
-  });
+  $('#fpRepeat').addEventListener('click', toggleRepeat);
+  const playerRepeat = $('#playerRepeat');
+  if (playerRepeat) playerRepeat.addEventListener('click', toggleRepeat);
+
+  // Mute toggles (mini bar + full player). Speaker icon flips to muted glyph.
+  const fpMute = $('#fpMute');
+  if (fpMute) fpMute.addEventListener('click', toggleMute);
+  const playerMute = $('#playerMute');
+  if (playerMute) playerMute.addEventListener('click', toggleMute);
+
+  // Like toggles (mini bar + full player). Both act on the now-playing track.
+  const fpLike = $('#fpLike');
+  if (fpLike) fpLike.addEventListener('click', _toggleCurrentLike);
+  const playerLike = $('#playerLike');
+  if (playerLike) playerLike.addEventListener('click', _toggleCurrentLike);
+  // Repaint both hearts whenever like state changes anywhere (e.g. via a row heart).
+  window.addEventListener('likeschange', syncLikeUI);
+
+  // Reflect initial state on all toggle buttons.
+  syncShuffleRepeatUI();
+  syncMuteUI();
+  syncLikeUI();
 
   // ── Swipe on album art for next/prev ──
   (function() {

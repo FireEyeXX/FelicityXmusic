@@ -10,6 +10,7 @@ import { getPlayerModule } from './player_active.js';
 import { initUpNext } from './upnext.js';
 import { loadFavoritedArtistIds } from './favorites.js';
 import { restoreSearch } from './search.js';
+import { loadLikes } from './likes.js';
 
 // ── Version Check ──
 export async function checkVersion() {
@@ -153,6 +154,9 @@ export async function initApp() {
 
     // Load favorited artist IDs
     loadFavoritedArtistIds();
+
+    // Load liked-songs set (drives every heart icon; re-fetched on each login)
+    loadLikes(true).catch(() => {});
 
     // Restore previous search if any
     restoreSearch();

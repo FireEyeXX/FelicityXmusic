@@ -48,6 +48,7 @@ export function switchPage(page, fromPopstate) {
   if (page === 'library') {
     if ($('#libraryList')) $('#libraryList').style.display = '';
     if ($('#libraryDetail')) $('#libraryDetail').style.display = 'none';
+    if ($('#likedSongsDetail')) $('#likedSongsDetail').style.display = 'none';
   }
   // Call registered page loaders
   if (pageLoaders[page]) pageLoaders[page]();
@@ -77,7 +78,7 @@ function handleClickableSearch(e) {
 // ── Close sub-pages ──
 // These are imported from their respective modules for popstate handling
 
-let closePlaylistDetail, closeShowDetail, closePodcastShow, closeTagDetail, closeArtistDetail, closeAlbumDetail, closeLibraryDetail;
+let closePlaylistDetail, closeShowDetail, closePodcastShow, closeTagDetail, closeArtistDetail, closeAlbumDetail, closeLibraryDetail, closeLikedSongs;
 
 export function setCloseHandlers(handlers) {
   closePlaylistDetail = handlers.closePlaylistDetail;
@@ -87,6 +88,7 @@ export function setCloseHandlers(handlers) {
   closeArtistDetail = handlers.closeArtistDetail;
   closeAlbumDetail = handlers.closeAlbumDetail;
   closeLibraryDetail = handlers.closeLibraryDetail;
+  closeLikedSongs = handlers.closeLikedSongs;
 }
 
 // ── Popstate Handler ──
@@ -110,6 +112,7 @@ function handlePopstate(e) {
   if ($('#artistDetail').style.display !== 'none' && closeArtistDetail) { closeArtistDetail(true); return; }
   if ($('#albumDetail') && $('#albumDetail').style.display !== 'none' && closeAlbumDetail) { closeAlbumDetail(true); return; }
   if ($('#libraryDetail') && $('#libraryDetail').style.display !== 'none' && closeLibraryDetail) { closeLibraryDetail(true); return; }
+  if ($('#likedSongsDetail') && $('#likedSongsDetail').style.display !== 'none' && closeLikedSongs) { closeLikedSongs(true); return; }
   // Guard: prevent exiting the app
   if (!state || state.guard) {
     history.pushState({ page: store.currentPage }, '');

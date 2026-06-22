@@ -11,6 +11,21 @@ let recsLoading = false;
 let recsDirty = true;
 let recsPlayingIdx = -1; // -1 = not playing from recs
 
+// ── Endless radio: re-seed from a sliding window of recently played recs ──
+const SEED_WINDOW = 8;        // last N played/accepted recs become the drift seed
+const TOPUP_THRESHOLD = 5;    // top up when fewer than this remain ahead
+const MAX_DRIFT_STEPS = 6;    // after this many top-ups, re-anchor to original seed
+let _originalSeed = [];       // snapshot of the queue that started the station
+let _playedWindow = [];       // recently played recs (sliding window of {name, artist, album, image})
+let _driftSteps = 0;          // how far we've drifted from the original seed
+let _toppingUp = false;       // guard against concurrent top-ups
+
+function _recordPlayedRec(track) {
+  if (!track || !track.name) return;
+  _playedWindow.push({ name: track.name, artist: track.artist || '', album: track.album || '', image: track.image || '' });
+  if (_playedWindow.length > SEED_WINDOW) _playedWindow = _playedWindow.slice(-SEED_WINDOW);
+}
+
 // ── Feedback log (skipped/accepted) — persisted in localStorage ──
 const FB_KEY = 'ms_recs_feedback_v1';
 const FB_MAX = 60;          // cap size per list
@@ -74,6 +89,10 @@ export async function playNextRec() {
   const track = recsCache[recsPlayingIdx];
   if (!track) { recsPlayingIdx = -1; return false; }
 
+  // Endless radio: remember what played and top up the station in the background.
+  _recordPlayedRec(track);
+  _maybeTopUp();
+
   // Play directly via player without adding to queue
   getPlayerModule().then(m => m.playRecTrack(track));
   renderRecs();
@@ -109,10 +128,11 @@ async function loadRecs() {
   renderLoading();
   try {
     const fb = _loadFeedback();
+    const seedTracks = store.playerQueue.slice(-30);
     const data = await apiJson('/api/player/recommendations', {
       method: 'POST',
       body: {
-        tracks: store.playerQueue.slice(-30),
+        tracks: seedTracks,
         limit: 20,
         skipped: fb.skipped.slice(-30),
         accepted: fb.accepted.slice(-30),
@@ -120,12 +140,67 @@ async function loadRecs() {
     });
     recsCache = data.tracks || [];
     recsDirty = false;
+    // Re-anchor the endless-radio station on a fresh full load.
+    _originalSeed = seedTracks;
+    _playedWindow = [];
+    _driftSteps = 0;
     renderRecs();
   } catch {
     recsCache = [];
     renderRecs();
   } finally {
     recsLoading = false;
+  }
+}
+
+// ── Endless radio: top up the virtual queue in the background ──
+// Re-seeds from the sliding window of recently played recs so the station drifts
+// with the session, but re-anchors to the original seed after MAX_DRIFT_STEPS to
+// guard against drifting infinitely off-taste.
+async function _maybeTopUp() {
+  if (_toppingUp || recsLoading) return;
+  const remaining = recsCache.length - (recsPlayingIdx + 1);
+  if (remaining > TOPUP_THRESHOLD) return;
+
+  _toppingUp = true;
+  try {
+    // Drift guard: every MAX_DRIFT_STEPS top-ups, fold the original seed back in.
+    let seed;
+    if (_driftSteps >= MAX_DRIFT_STEPS) {
+      seed = _originalSeed.slice();
+      _driftSteps = 0;
+    } else {
+      // Blend recent plays (drift) with a slice of the original seed (anchor).
+      seed = _playedWindow.concat(_originalSeed.slice(-4));
+      _driftSteps++;
+    }
+    if (!seed.length) seed = _originalSeed.slice();
+    if (!seed.length) return;
+
+    const fb = _loadFeedback();
+    const data = await apiJson('/api/player/recommendations', {
+      method: 'POST',
+      body: {
+        tracks: seed,
+        limit: 15,
+        skipped: fb.skipped.slice(-30),
+        accepted: fb.accepted.slice(-30),
+      },
+    });
+    const fresh = data.tracks || [];
+    if (fresh.length) {
+      // Append only tracks not already in the cache (dedup by name+artist).
+      const seen = new Set(recsCache.map(t => `${(t.name || '').toLowerCase()}|${(t.artist || '').toLowerCase()}`));
+      for (const t of fresh) {
+        const k = `${(t.name || '').toLowerCase()}|${(t.artist || '').toLowerCase()}`;
+        if (!seen.has(k)) { recsCache.push(t); seen.add(k); }
+      }
+      renderRecs();
+    }
+  } catch {
+    // top-up failure is non-fatal; station keeps playing what it has
+  } finally {
+    _toppingUp = false;
   }
 }
 
@@ -182,6 +257,8 @@ export function playRecIndex(idx) {
   const track = recsCache[idx];
   if (!track) return;
   recsPlayingIdx = idx;
+  _recordPlayedRec(track);
+  _maybeTopUp();
   getPlayerModule().then(m => m.playRecTrack(track));
   import('./queue.js').then(m => {
     if (store.queuePanelOpen && m.closeQueuePanel) m.closeQueuePanel();
@@ -207,6 +284,8 @@ function _attachRecsHandlers(el) {
       const track = recsCache[idx];
       if (!track) return;
       recsPlayingIdx = idx;
+      _recordPlayedRec(track);
+      _maybeTopUp();
       getPlayerModule().then(m => m.playRecTrack(track));
       // Close any open queue panel so player controls are accessible
       // (queue-panel sits above the player bar via z-index)

@@ -77,9 +77,17 @@ export function createBpmFilter(tracksContainerId) {
       &ndash;
       <input type="number" class="bpm-range-input" id="bpmMax" min="40" max="200" placeholder="Max">
     </label>
+    <span class="bpm-filter-sep">|</span>
+    <button class="bpm-preset" id="bpmPlayFiltered">&#9654; Play filtered</button>
+    <button class="bpm-preset" id="bpmPlayRamp">&#9654; Play slow&rarr;fast</button>
   `;
 
+  // Tracks the active bucket so the play buttons know whether to exclude
+  // unknown-BPM tracks. "All" (min 0 / max 999) means include everything.
+  let _activeMin = 0, _activeMax = 999;
+
   const apply = (min, max) => {
+    _activeMin = min; _activeMax = max;
     const container = $(tracksContainerId);
     if (!container) return;
     $$('.card', container).forEach(card => {
@@ -93,8 +101,12 @@ export function createBpmFilter(tracksContainerId) {
   };
 
   el.querySelectorAll('.bpm-preset').forEach(btn => {
+    if (btn.id === 'bpmPlayFiltered' || btn.id === 'bpmPlayRamp') return;
     btn.addEventListener('click', () => {
-      el.querySelectorAll('.bpm-preset').forEach(b => b.classList.remove('active'));
+      el.querySelectorAll('.bpm-preset').forEach(b => {
+        if (b.id === 'bpmPlayFiltered' || b.id === 'bpmPlayRamp') return;
+        b.classList.remove('active');
+      });
       btn.classList.add('active');
       const min = parseInt(btn.dataset.min), max = parseInt(btn.dataset.max);
       el.querySelector('#bpmMin').value = min > 0 ? min : '';
@@ -104,14 +116,107 @@ export function createBpmFilter(tracksContainerId) {
   });
 
   const onRange = () => {
-    el.querySelectorAll('.bpm-preset').forEach(b => b.classList.remove('active'));
+    el.querySelectorAll('.bpm-preset').forEach(b => {
+      if (b.id === 'bpmPlayFiltered' || b.id === 'bpmPlayRamp') return;
+      b.classList.remove('active');
+    });
     apply(parseInt(el.querySelector('#bpmMin').value) || 0,
           parseInt(el.querySelector('#bpmMax').value) || 999);
   };
   el.querySelector('#bpmMin').addEventListener('input', onRange);
   el.querySelector('#bpmMax').addEventListener('input', onRange);
 
+  // ── Collect the currently-visible (filtered) tracks from the DOM. ──
+  const _visibleTracks = () => {
+    const container = $(tracksContainerId);
+    if (!container) return [];
+    return $$('.card', container)
+      .filter(card => card.style.display !== 'none' && card.dataset.item)
+      .map(card => { try { return JSON.parse(card.dataset.item); } catch { return null; } })
+      .filter(Boolean);
+  };
+
+  // Whether a non-"All" bucket/range is active (so unknown-BPM tracks are excluded).
+  const _filterActive = () => !(_activeMin <= 0 && _activeMax >= 999);
+
+  // Apply the unknown-BPM exclusion policy and surface an Analyze toast for any
+  // tracks that were dropped because they have no cached BPM.
+  const _applyUnknownPolicy = (tracks) => {
+    if (!_filterActive()) return tracks;
+    const kept = [], dropped = [];
+    for (const t of tracks) {
+      if (getCachedBpm(t.name, t.artist) == null) dropped.push(t); else kept.push(t);
+    }
+    if (dropped.length) {
+      _showAnalyzeToast(`${dropped.length} tracks not analyzed`, () => _analyzeContainer(tracksContainerId));
+    }
+    return kept;
+  };
+
+  el.querySelector('#bpmPlayFiltered').addEventListener('click', async () => {
+    const tracks = _applyUnknownPolicy(_visibleTracks());
+    if (!tracks.length) { showToast('No tracks to play'); return; }
+    const u = await import('./upnext.js');
+    u.playTracks(tracks);
+  });
+
+  el.querySelector('#bpmPlayRamp').addEventListener('click', async () => {
+    // Tempo ramp: drop unknown BPM, sort ascending by cached BPM.
+    const tracks = _visibleTracks()
+      .map(t => ({ t, bpm: getCachedBpm(t.name, t.artist) }))
+      .filter(x => x.bpm != null)
+      .sort((a, b) => a.bpm - b.bpm)
+      .map(x => x.t);
+    if (!tracks.length) {
+      _showAnalyzeToast('No analyzed tracks to ramp', () => _analyzeContainer(tracksContainerId));
+      return;
+    }
+    const u = await import('./upnext.js');
+    u.playTracks(tracks);
+  });
+
   return el;
+}
+
+// Toast with an "Analyze" action button (showToast has no action support).
+function _showAnalyzeToast(msg, onAnalyze) {
+  let toast = $('#bpmActionToast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'bpmActionToast';
+    toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg-elevated);color:var(--text);padding:10px 16px;border-radius:20px;font-size:13px;z-index:999;opacity:0;transition:opacity .3s;border:1px solid var(--border);display:flex;align-items:center;gap:12px;';
+    document.body.appendChild(toast);
+  }
+  toast.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  const btn = document.createElement('button');
+  btn.textContent = 'Analyze';
+  btn.style.cssText = 'background:var(--accent);color:#000;border:none;border-radius:14px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer;';
+  btn.addEventListener('click', () => { toast.style.opacity = '0'; onAnalyze && onAnalyze(); });
+  toast.appendChild(span);
+  toast.appendChild(btn);
+  toast.style.opacity = '1';
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 5000);
+}
+
+// Trigger the existing Analyze flow by clicking the on-screen scan button if
+// present; otherwise fall back to analyzing every un-analyzed track in-place.
+async function _analyzeContainer(tracksContainerId) {
+  const scanBtn = $('#bpmScanBtn');
+  if (scanBtn && !scanBtn.disabled) { scanBtn.click(); return; }
+  const cards = $$('.card', $(tracksContainerId));
+  for (const card of cards) {
+    if (!card.dataset.item) continue;
+    try {
+      const item = JSON.parse(card.dataset.item);
+      if (item.type && item.type !== 'track') continue;
+      if (getCachedBpm(item.name, item.artist) != null) continue;
+      await fetchTrackBpm(item.name, item.artist);
+      addBpmBadges(tracksContainerId); // live badge progress as each track resolves
+    } catch {}
+  }
 }
 
 /** Add "Analyze BPM" button — fires 6 concurrent per-track requests for real-time progress. */

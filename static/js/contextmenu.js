@@ -14,6 +14,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { store } from './store.js';
 import { getPlayerModule } from './player_active.js';
+import { isLiked, toggleLike } from './likes.js';
 
 const LONG_PRESS_MS = 480;
 const MOVE_THRESHOLD = 10; // px
@@ -294,6 +295,15 @@ export function buildActionsFor(item, type, context = {}) {
     actions.push({ divider: true });
   }
 
+  // ── Like / Unlike (track-like) — label reflects current state ──
+  if (isTracklike) {
+    const liked = isLiked(it);
+    actions.push({
+      label: liked ? 'Unlike' : 'Like', icon: liked ? '&#9829;' : '&#9825;',
+      onClick: () => toggleLike(it),
+    });
+  }
+
   // ── Add to Navidrome playlist (track-like) ──
   if (isTracklike) {
     actions.push({
@@ -487,6 +497,16 @@ function _openArtist(item) {
   }
 }
 
+// ── Public navigation helpers (reused by the now-playing UI) ──
+// Mirror the "Show artist" / "Show album" context-menu actions: navigate by
+// id when available, otherwise fall back to a name search (same as the menu).
+export function openArtistByName(name) {
+  if (name) _searchFor('artist', name);
+}
+export function openAlbumByName(album) {
+  if (album) _searchFor('album', album);
+}
+
 function _openItem(item) {
   if (item.type === 'playlist' && item.id) {
     import('./spotify.js').then(m => m.loadPlaylistDetail && m.loadPlaylistDetail(item.id, item.url, 'search'));
@@ -522,6 +542,33 @@ function _copyInfo(item) {
   } catch {
     showToast('Copy failed');
   }
+}
+
+// ── Visible kebab (⋯) button ──
+// Creates a discoverable button that opens the SAME context menu as
+// right-click / long-press. `resolveInfo()` must return the same shape as an
+// attachContextMenu getItem result: { item, type, context } or { title, actions }.
+// The menu is anchored at the button's on-screen position.
+export function makeKebabButton(resolveInfo, opts = {}) {
+  const btn = document.createElement('button');
+  btn.className = 'kebab-btn' + (opts.className ? ' ' + opts.className : '');
+  btn.type = 'button';
+  btn.title = 'More';
+  btn.setAttribute('data-ctx-skip', '');
+  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
+  // Prevent the row/card click (play / open) from firing.
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const info = resolveInfo();
+    if (!info) return;
+    const actions = info.actions || (info.item ? buildActionsFor(info.item, info.type || 'track', info.context || {}) : null);
+    if (!actions || !actions.length) return;
+    const title = info.title || (info.item && info.item.name) || '';
+    const rect = btn.getBoundingClientRect();
+    showContextMenu(rect.left, rect.bottom + 4, actions, { title });
+  });
+  return btn;
 }
 
 export function init() {

@@ -19,7 +19,7 @@ import { init as initFavorites, loadFavorites } from './favorites.js';
 import { init as initPodcasts, loadPodcasts, closePodcastShow } from './podcasts.js';
 import { init as initSettings, loadSettings } from './settings.js';
 import { init as initRecognize } from './recognize.js';
-import { init as initLibrary, loadLibrary, closeLibraryDetail } from './library.js';
+import { init as initLibrary, loadLibrary, closeLibraryDetail, closeLikedSongs } from './library.js';
 import { init as initRecommendations } from './recommendations.js';
 import { initVirtualKeyboard } from './utils.js';
 
@@ -40,6 +40,7 @@ setCloseHandlers({
   closeArtistDetail,
   closeAlbumDetail,
   closeLibraryDetail,
+  closeLikedSongs,
 });
 
 // Register page loaders with router

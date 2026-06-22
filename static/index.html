@@ -20,6 +20,72 @@
 <link rel="stylesheet" href="/static/css/settings.css?v=__CACHE_BUST__">
 <link rel="stylesheet" href="/static/css/responsive.css?v=__CACHE_BUST__">
 <link rel="stylesheet" href="/static/css/contextmenu.css?v=__CACHE_BUST__">
+<style>
+  /* ── Visible kebab (⋯) button: opens the context menu (mobile-friendly) ── */
+  .kebab-btn {
+    background: rgba(0,0,0,.55); color: var(--text);
+    border: none; border-radius: 50%;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: background .15s, color .15s;
+    flex-shrink: 0;
+  }
+  .kebab-btn:hover { background: rgba(0,0,0,.75); color: var(--accent); }
+  /* On cards: pinned top-left (top-right is the follow button), above the art. */
+  .card .kebab-btn {
+    position: absolute; top: 8px; left: 8px; z-index: 4;
+    width: 40px; height: 40px;
+  }
+  /* Library-detail cards already use top-left (checkbox) + top-right (remove)
+     + bottom corners (play/download), so place the kebab on the right edge. */
+  .card .kebab-btn.kebab-lib { top: 50%; left: auto; right: 8px; transform: translateY(-50%); }
+  /* In queue rows the kebab sits inline, before the remove button. */
+  .queue-item .kebab-btn { width: 40px; height: 40px; background: none; }
+  .queue-item .kebab-btn:hover { background: rgba(255,255,255,.06); }
+  /* ── Mini player-bar shuffle/repeat active state (mirrors .fp-mode-btn) ── */
+  .player-actions .player-mode-btn { position: relative; }
+  .player-actions .player-mode-btn.active { color: var(--accent) !important; }
+  .player-actions .player-mode-btn .player-repeat-badge {
+    position: absolute; top: 2px; right: 4px;
+    font-size: 9px; font-weight: 700; color: var(--accent);
+  }
+  /* ── Like (heart) buttons — used in player bar, full player, rows/cards ── */
+  .like-btn {
+    background: none; border: none; color: var(--text-muted);
+    cursor: pointer; padding: 0; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px;
+    transition: color .15s, transform .1s;
+  }
+  .like-btn:hover { color: var(--text); }
+  .like-btn:active { transform: scale(.85); }
+  .like-btn.liked { color: #1db954; }
+  /* On cards: pinned top-right corner, above the art (kebab is top-left). */
+  .card .like-btn {
+    position: absolute; top: 8px; right: 8px; z-index: 4;
+  }
+  /* In queue rows the heart sits inline, before the kebab. */
+  .queue-item .like-btn:hover { background: rgba(255,255,255,.06); border-radius: 50%; }
+  /* Library-detail cards: remove (top-right) + kebab (mid-right) are taken, so
+     pin the heart to the bottom-right corner instead. */
+  #libraryTracks .card .like-btn { top: auto; bottom: 8px; right: 8px; }
+  /* ── Recent searches (chips shown when the input is focused & empty) ── */
+  .recent-searches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .recent-chip {
+    background: var(--bg-elevated); color: var(--text);
+    border: 1px solid var(--border); border-radius: 16px;
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .recent-chip:hover { background: var(--bg-card, rgba(255,255,255,.08)); border-color: var(--accent); }
+  .recent-clear {
+    background: none; border: none; color: var(--text-muted);
+    font-size: 12px; cursor: pointer; padding: 6px 8px; margin-left: 4px;
+  }
+  .recent-clear:hover { color: var(--text); }
+  /* ── Keyboard navigation highlight on search result cards ── */
+  #searchResults .card.kbd-active { outline: 2px solid var(--accent); outline-offset: -2px; }
+</style>
 </head>
 <body>
 
@@ -129,6 +195,7 @@
       <button class="type-btn" data-type="playlist">Playlists</button>
       <button class="type-btn" data-type="show">Podcasts</button>
     </div>
+    <div id="recentSearches" class="recent-searches" style="display:none;"></div>
   </div>
   <div class="recognize-result" id="recognizeResult">
     <div class="rr-label" id="rrLabel">Song identified</div>
@@ -231,7 +298,29 @@
       <h2 class="page-title" style="margin:0;">My Library</h2>
       <button id="newLibPlaylist" class="btn-check-new">+ New Playlist</button>
     </div>
+    <div class="card lib-card" id="likedSongsTile" style="margin-bottom:18px;">
+      <div class="card-img" style="background:linear-gradient(135deg,#1db954,#1a1a2e);display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff;">&#9829;</div>
+      <div class="card-body">
+        <div class="card-title">Liked Songs</div>
+        <div class="card-sub" id="likedSongsCount"></div>
+      </div>
+    </div>
     <div id="libraryGrid" class="grid"></div>
+  </div>
+  <div id="likedSongsDetail" style="display:none; margin-top:24px;">
+    <button id="backToLibraryFromLiked" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
+    <div class="playlist-hero">
+      <div id="likedHeroImg" class="playlist-hero-img" style="background:linear-gradient(135deg,#1db954,#1a1a2e);display:flex;align-items:center;justify-content:center;font-size:48px;color:#fff;">&#9829;</div>
+      <div class="playlist-hero-info">
+        <h2>Liked Songs</h2>
+        <p id="likedDetailCount"></p>
+      </div>
+      <div class="playlist-hero-actions">
+        <button class="btn-download" id="playLikedSongs" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
+        <button class="btn-download" id="shuffleLikedSongs" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">&#128256; Shuffle</button>
+      </div>
+    </div>
+    <div id="likedSongsTracks" class="grid"></div>
   </div>
   <div id="libraryDetail" style="display:none; margin-top:24px;">
     <button id="backToLibrary" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
@@ -852,11 +941,15 @@
     <span class="player-time" id="playerTimeTotal">0:00</span>
   </div>
   <div class="player-actions">
+    <button class="like-btn" id="playerLike" title="Add to Liked Songs"></button>
     <button id="playerCastBtn" title="Cast to speaker"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg></button>
     <button id="playerQueueBtn" title="Playlist"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
+    <button class="player-mode-btn" id="playerShuffle" title="Shuffle"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
+    <button class="player-mode-btn" id="playerRepeat" title="Repeat off"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg><span class="player-repeat-badge" id="playerRepeatBadge"></span></button>
     <button id="playerAddToPlaylist" title="Add to playlist"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg></button>
     <button id="playerRemoveFromPlaylist" title="Remove from playlist" style="display:none;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg></button>
     <button id="playerDownloadBtn" title="Download current track"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+    <button id="playerMute" title="Mute"><svg id="playerMuteIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg></button>
     <input type="range" class="player-volume" id="playerVolume" min="0" max="100" value="100" title="Volume">
   </div>
   <audio id="audioElement" preload="none"></audio>
@@ -896,12 +989,13 @@
     </div>
     <div class="fp-actions">
       <button class="fp-mode-btn" id="fpDjMode" title="DJ Mode" style="display:none;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/></svg></button>
+      <button class="like-btn" id="fpLike" title="Add to Liked Songs"></button>
       <button id="fpCastBtn" title="Cast to speaker"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg></button>
       <button id="fpAddToPlaylist" title="Add to playlist"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg></button>
       <button id="fpRemoveFromPlaylist" title="Remove from playlist" style="display:none;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg></button>
       <button id="fpDownload" title="Download"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
       <div class="fp-vol-wrap">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
+        <button id="fpMute" title="Mute" style="background:none;border:none;color:inherit;cursor:pointer;padding:0;display:flex;align-items:center;"><svg id="fpMuteIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg></button>
         <input type="range" class="fp-vol" id="fpVolume" min="0" max="100" value="100">
       </div>
     </div>

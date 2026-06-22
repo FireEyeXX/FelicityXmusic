@@ -5,8 +5,9 @@ import { $, $$, esc, showToast, historyBack, showPlaylistPicker } from './utils.
 import { apiJson } from './api.js';
 import { renderResults } from './search.js';
 import { fetchPlaylistBpm, addBpmBadges, createBpmFilter, addScanButton } from './bpm.js';
-import { attachContextMenu, buildActionsFor, showContextMenu, wasLongPress } from './contextmenu.js';
+import { attachContextMenu, buildActionsFor, showContextMenu, wasLongPress, makeKebabButton } from './contextmenu.js';
 import { getPlayerModule } from './player_active.js';
+import { loadLikes, getLikedTracks, likedCount } from './likes.js';
 
 let libraryCache = null;
 let currentLibPlaylistId = null;
@@ -23,7 +24,10 @@ export async function loadLibrary() {
   const grid = $('#libraryGrid');
   if (!grid) return;
   $('#libraryDetail').style.display = 'none';
+  const likedDetail = $('#likedSongsDetail');
+  if (likedDetail) likedDetail.style.display = 'none';
   $('#libraryList').style.display = '';
+  _refreshLikedCount();
   grid.innerHTML = Array(6).fill('<div class="skeleton skeleton-card"></div>').join('');
   try {
     const data = await apiJson('/api/library/playlists');
@@ -152,6 +156,7 @@ async function loadLibraryDetail(id) {
     // Override context menu: inject libraryPlaylistId/Name so right-click offers
     // "Remove from playlist" and "Delete from library" actions.
     _attachLibraryTrackContextMenu(id, currentLibPlaylistName);
+    _attachLibraryKebabs(id, currentLibPlaylistName);
     _addBulkCheckboxes();
     _addSelectListeners();
     _addRemoveButtons(id);
@@ -188,6 +193,36 @@ function _markTracksInLibrary(containerSelector, tracks) {
 // Re-attaches with augmented getItem that adds "Remove from playlist" and
 // "Delete from library" actions. Resets __ctxAttached so attachContextMenu
 // replaces the previous handler from renderResults.
+// Build the menu info for a library-detail track card. Shared by both the
+// right-click/long-press context menu and the visible ⋯ kebab so they offer
+// identical actions (including multi-select and Remove/Delete from library).
+function _libraryTrackInfo(targetEl, playlistId, playlistName) {
+  try {
+    const item = JSON.parse(targetEl.dataset.item);
+    const idx = Array.from($$('#libraryTracks .card')).indexOf(targetEl);
+    // If this card is part of a multi-selection, build a multi-track menu
+    if (_selectSet.size > 1 && _selectSet.has(idx)) {
+      return _buildMultiSelectMenu(playlistId, playlistName);
+    }
+    const type = item.type || 'track';
+    const base = buildActionsFor(item, type, { inLibrary: true });
+    // Inject "Remove from this playlist" before Delete at the end
+    const removeAction = {
+      label: `Remove from "${playlistName}"`, icon: '&times;', danger: false,
+      onClick: () => _removeTrackFromPlaylist(playlistId, item, idx),
+    };
+    const deleteAction = {
+      label: 'Delete from library', icon: '&#128465;', danger: true,
+      onClick: () => _deleteTrackFromLibrary(item),
+    };
+    return {
+      item,
+      type,
+      actions: [...base, { divider: true }, removeAction, deleteAction],
+    };
+  } catch { return null; }
+}
+
 function _attachLibraryTrackContextMenu(playlistId, playlistName) {
   const el = $('#libraryTracks');
   if (!el) return;
@@ -195,32 +230,18 @@ function _attachLibraryTrackContextMenu(playlistId, playlistName) {
   el.__ctxAttached = false;
   attachContextMenu(el, {
     selector: '.card[data-item]',
-    getItem: (targetEl) => {
-      try {
-        const item = JSON.parse(targetEl.dataset.item);
-        const idx = Array.from($$('#libraryTracks .card')).indexOf(targetEl);
-        // If this card is part of a multi-selection, build a multi-track menu
-        if (_selectSet.size > 1 && _selectSet.has(idx)) {
-          return _buildMultiSelectMenu(playlistId, playlistName);
-        }
-        const type = item.type || 'track';
-        const base = buildActionsFor(item, type, { inLibrary: true });
-        // Inject "Remove from this playlist" before Delete at the end
-        const removeAction = {
-          label: `Remove from "${playlistName}"`, icon: '&times;', danger: false,
-          onClick: () => _removeTrackFromPlaylist(playlistId, item, idx),
-        };
-        const deleteAction = {
-          label: 'Delete from library', icon: '&#128465;', danger: true,
-          onClick: () => _deleteTrackFromLibrary(item),
-        };
-        return {
-          item,
-          type,
-          actions: [...base, { divider: true }, removeAction, deleteAction],
-        };
-      } catch { return null; }
-    },
+    getItem: (targetEl) => _libraryTrackInfo(targetEl, playlistId, playlistName),
+  });
+}
+
+// Replace the generic kebabs (added by renderResults) with library-context ones
+// so the ⋯ button offers the same Remove/Delete actions as right-click.
+function _attachLibraryKebabs(playlistId, playlistName) {
+  $$('#libraryTracks .card').forEach(card => {
+    const old = card.querySelector('.kebab-btn');
+    if (old) old.remove();
+    const kebab = makeKebabButton(() => _libraryTrackInfo(card, playlistId, playlistName), { className: 'kebab-lib' });
+    card.appendChild(kebab);
   });
 }
 
@@ -502,6 +523,49 @@ export function closeLibraryDetail(fromPopstate) {
   if (!fromPopstate) historyBack();
 }
 
+// ── Liked Songs view ──
+let _likedViewOpen = false;
+
+function _refreshLikedCount() {
+  const n = likedCount();
+  const tileCount = $('#likedSongsCount');
+  if (tileCount) tileCount.textContent = n === 1 ? '1 song' : `${n} songs`;
+}
+
+export async function openLikedSongs() {
+  $('#libraryList').style.display = 'none';
+  $('#libraryDetail').style.display = 'none';
+  $('#likedSongsDetail').style.display = '';
+  _likedViewOpen = true;
+  history.pushState({ layer: 'likedSongs' }, '');
+  const tracksEl = $('#likedSongsTracks');
+  tracksEl.innerHTML = Array(8).fill('<div class="skeleton skeleton-card"></div>').join('');
+  await loadLikes();
+  const tracks = getLikedTracks();
+  $('#likedDetailCount').textContent = tracks.length === 1 ? '1 song' : `${tracks.length} songs`;
+  _refreshLikedCount();
+  if (!tracks.length) {
+    tracksEl.innerHTML = '<div class="empty-state"><p>Songs you like will appear here.</p></div>';
+    return;
+  }
+  // Reuse the shared track-row renderer (gives kebab + heart + context menu).
+  renderResults(tracks, '#likedSongsTracks');
+}
+
+export function closeLikedSongs(fromPopstate) {
+  if (!_likedViewOpen) return;
+  $('#likedSongsDetail').style.display = 'none';
+  $('#libraryList').style.display = '';
+  _likedViewOpen = false;
+  _refreshLikedCount();
+  if (!fromPopstate) historyBack();
+}
+
+function _getLikedTracksForPlayer() {
+  const cards = $$('#likedSongsTracks .card');
+  return cards.map(c => { try { return JSON.parse(c.dataset.item); } catch { return null; } }).filter(Boolean);
+}
+
 // ── Get current library playlist context (for recommendations) ──
 export function getCurrentLibPlaylist() {
   if (!currentLibPlaylistId || !currentLibPlaylistTracks.length) return null;
@@ -512,6 +576,24 @@ export function getCurrentLibPlaylist() {
 export function init() {
   const backBtn = $('#backToLibrary');
   if (backBtn) backBtn.addEventListener('click', () => closeLibraryDetail());
+
+  // ── Liked Songs tile / view ──
+  const likedTile = $('#likedSongsTile');
+  if (likedTile) likedTile.addEventListener('click', () => openLikedSongs());
+  const likedBack = $('#backToLibraryFromLiked');
+  if (likedBack) likedBack.addEventListener('click', () => closeLikedSongs());
+  const playLiked = $('#playLikedSongs');
+  if (playLiked) playLiked.addEventListener('click', () => {
+    const tracks = _getLikedTracksForPlayer();
+    if (tracks.length) import('./upnext.js').then(m => m.playTracks(tracks));
+  });
+  const shuffleLiked = $('#shuffleLikedSongs');
+  if (shuffleLiked) shuffleLiked.addEventListener('click', () => {
+    const tracks = _getLikedTracksForPlayer();
+    if (!tracks.length) return;
+    const shuffled = tracks.slice().sort(() => Math.random() - 0.5);
+    import('./upnext.js').then(m => m.playTracks(shuffled));
+  });
 
   // Play All
   const playBtn = $('#playLibPlaylist');
@@ -700,6 +782,8 @@ export function init() {
 }
 
 function getLibTracksForPlayer() {
-  const cards = $$('#libraryTracks .card');
+  // Respect the active BPM filter: hidden cards (display:none) are excluded so
+  // Play All / Queue All only act on the currently-visible (filtered) set.
+  const cards = $$('#libraryTracks .card').filter(c => c.style.display !== 'none');
   return cards.map(c => { try { return JSON.parse(c.dataset.item); } catch { return null; } }).filter(Boolean);
 }

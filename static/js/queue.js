@@ -3,7 +3,8 @@
 import { store } from './store.js';
 import { $, $$, esc, historyBack, showToast } from './utils.js';
 import { getCachedBpm } from './bpm.js';
-import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { attachContextMenu, wasLongPress, makeKebabButton } from './contextmenu.js';
+import { makeHeartButton } from './likes.js';
 import { getPlayerModule } from './player_active.js';
 
 // Forward references set during init to avoid circular imports
@@ -101,6 +102,22 @@ export function renderQueueInto(el) {
       if (!item) return null;
       return { item, type: 'queue-track', context: { queueIndex: idx } };
     },
+  });
+  // Visible ⋯ kebab + heart on each row → heart left of the kebab.
+  $$('.queue-item', el).forEach(qi => {
+    if (qi.querySelector('.kebab-btn')) return;
+    const idx = parseInt(qi.dataset.qi);
+    const kebab = makeKebabButton(() => {
+      const item = store.playerQueue[idx];
+      if (!item) return null;
+      return { item, type: 'queue-track', context: { queueIndex: idx } };
+    });
+    const rm = qi.querySelector('.qi-remove');
+    if (rm) qi.insertBefore(kebab, rm); else qi.appendChild(kebab);
+    if (store.playerQueue[idx] && !qi.querySelector('.like-btn')) {
+      // getter (not a snapshot) so the heart stays correct after a queue reorder
+      qi.insertBefore(makeHeartButton(() => store.playerQueue[idx]), kebab);
+    }
   });
   $$('.qi-remove', el).forEach(btn => {
     btn.addEventListener('click', (e) => {

@@ -5,7 +5,7 @@ import { $, $$, fmtTime, showToast } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
-import { syncFullPlayer } from './fullplayer.js';
+import { syncFullPlayer, syncMuteUI } from './fullplayer.js';
 import { getCachedUrl, waitForCache, prefetchUpcoming, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
 import * as cast from './cast.js';
 
@@ -566,11 +566,13 @@ export function init() {
   $('#playerPrev').addEventListener('click', prevTrack);
   $('#playerVolume').addEventListener('input', (e) => {
     store.playerVolume = e.target.value / 100;
+    if ($('#fpVolume')) $('#fpVolume').value = e.target.value;
     if (store.castDevice) {
       apiJson('/api/dlna/volume', { method: 'POST', body: { volume: parseInt(e.target.value) } }).catch(() => {});
     } else {
       audio.volume = store.playerVolume;
     }
+    syncMuteUI();
   });
   async function _seekFromEvent(bar, e) {
     const dur = _getDuration();
@@ -717,6 +719,7 @@ export function init() {
         if ($('#fpVolume')) $('#fpVolume').value = Math.round(store.playerVolume * 100);
         if (store.castDevice) apiJson('/api/dlna/volume', { method: 'POST', body: { volume: Math.round(store.playerVolume * 100) } }).catch(() => {});
         else audio.volume = store.playerVolume;
+        syncMuteUI();
         break;
       case 'ArrowDown':
         e.preventDefault();
@@ -725,6 +728,7 @@ export function init() {
         if ($('#fpVolume')) $('#fpVolume').value = Math.round(store.playerVolume * 100);
         if (store.castDevice) apiJson('/api/dlna/volume', { method: 'POST', body: { volume: Math.round(store.playerVolume * 100) } }).catch(() => {});
         else audio.volume = store.playerVolume;
+        syncMuteUI();
         break;
     }
   });

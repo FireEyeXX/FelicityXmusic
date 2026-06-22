@@ -5,7 +5,8 @@ import { $, $$, esc, formatDuration } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { loadPlaylistDetail, loadShowDetail, loadArtistDetail, loadAlbumDetail } from './spotify.js';
-import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { attachContextMenu, wasLongPress, makeKebabButton } from './contextmenu.js';
+import { makeHeartButton } from './likes.js';
 
 // ── Card Helper Functions ──
 export function cardPlayBtn(item) {
@@ -90,6 +91,7 @@ export function renderResults(items, container, fromPage) {
     });
   });
   _attachCardContextMenu(el);
+  addCardKebabs($$('.card', el));
   checkLibrary(items, el);
 }
 
@@ -103,6 +105,28 @@ function _attachCardContextMenu(el) {
         return { item, type, context: { inLibrary: !!item.inLibrary } };
       } catch { return null; }
     },
+  });
+}
+
+// Add a visible ⋯ kebab to each card that opens the same context menu.
+// Reads the card's data-item live so it reflects later library-check updates.
+export function addCardKebabs(cards) {
+  cards.forEach(card => {
+    if (!card.dataset.item || card.querySelector('.kebab-btn')) return;
+    let item;
+    try { item = JSON.parse(card.dataset.item); } catch { return; }
+    const type = item.type || 'track';
+    const kebab = makeKebabButton(() => {
+      try {
+        const it = JSON.parse(card.dataset.item);
+        return { item: it, type: it.type || 'track', context: { inLibrary: !!it.inLibrary } };
+      } catch { return null; }
+    });
+    card.appendChild(kebab);
+    // Heart only makes sense for individual tracks (albums/artists/playlists excluded).
+    if (type === 'track' && !card.querySelector('.like-btn')) {
+      card.appendChild(makeHeartButton(item));
+    }
   });
 }
 
@@ -170,6 +194,112 @@ export function restoreSearch() {
   } catch {}
 }
 
+// ── Recent searches (localStorage, last ~8 distinct queries) ──
+const RECENT_KEY = 'ms_recent_searches';
+const RECENT_MAX = 8;
+
+function getRecentSearches() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(RECENT_KEY));
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function addRecentSearch(q) {
+  q = (q || '').trim();
+  if (!q) return;
+  let list = getRecentSearches().filter(x => x.toLowerCase() !== q.toLowerCase());
+  list.unshift(q);
+  list = list.slice(0, RECENT_MAX);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch {}
+}
+
+function clearRecentSearches() {
+  try { localStorage.removeItem(RECENT_KEY); } catch {}
+  renderRecentSearches();
+}
+
+// Render recent-search chips, but only while the input is focused AND empty.
+function renderRecentSearches() {
+  const wrap = $('#recentSearches');
+  if (!wrap) return;
+  const input = $('#searchInput');
+  const focused = document.activeElement === input;
+  const list = getRecentSearches();
+  if (!focused || (input && input.value.trim()) || !list.length) {
+    wrap.style.display = 'none';
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.innerHTML = list.map(q =>
+    `<button type="button" class="recent-chip" data-recent-q="${esc(q)}">${esc(q)}</button>`
+  ).join('') + '<button type="button" class="recent-clear" id="recentClear">Clear</button>';
+  wrap.style.display = 'flex';
+  $$('.recent-chip', wrap).forEach(chip => {
+    chip.addEventListener('mousedown', (e) => e.preventDefault()); // keep input focus
+    chip.addEventListener('click', () => {
+      const input2 = $('#searchInput');
+      input2.value = chip.dataset.recentQ;
+      $('#searchClear').style.display = 'block';
+      wrap.style.display = 'none';
+      clearTimeout(store.searchTimeout);
+      doSearch();
+    });
+  });
+  const clearBtn = $('#recentClear', wrap);
+  if (clearBtn) {
+    clearBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    clearBtn.addEventListener('click', clearRecentSearches);
+  }
+}
+
+// ── Keyboard navigation through search result cards ──
+let _kbdIndex = -1;
+
+function _kbdCards() {
+  return $$('#searchResults .card');
+}
+
+function _setKbdActive(idx) {
+  const cards = _kbdCards();
+  cards.forEach(c => c.classList.remove('kbd-active'));
+  _kbdIndex = Math.max(-1, Math.min(idx, cards.length - 1));
+  if (_kbdIndex >= 0 && cards[_kbdIndex]) {
+    cards[_kbdIndex].classList.add('kbd-active');
+    cards[_kbdIndex].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function _activateKbdCard() {
+  const cards = _kbdCards();
+  if (_kbdIndex < 0 || !cards[_kbdIndex]) return;
+  // Reuse the card's own click handler (play track / open album / artist / etc.).
+  cards[_kbdIndex].click();
+}
+
+function _handleSearchKeydown(e) {
+  if (e.key === 'ArrowDown') {
+    const cards = _kbdCards();
+    if (!cards.length) return;
+    e.preventDefault();
+    _setKbdActive(_kbdIndex + 1);
+  } else if (e.key === 'ArrowUp') {
+    const cards = _kbdCards();
+    if (!cards.length) return;
+    e.preventDefault();
+    _setKbdActive(_kbdIndex - 1);
+  } else if (e.key === 'Enter') {
+    if (_kbdIndex >= 0) { e.preventDefault(); _activateKbdCard(); return; }
+    clearTimeout(store.searchTimeout);
+    doSearch();
+  } else if (e.key === 'Escape') {
+    _setKbdActive(-1);
+    const wrap = $('#recentSearches');
+    if (wrap) wrap.style.display = 'none';
+    $('#searchInput').blur();
+  }
+}
+
 // ── Do Search ──
 export async function doSearch(append) {
   const q = $('#searchInput').value.trim();
@@ -225,10 +355,15 @@ export async function doSearch(append) {
         });
         grid.appendChild(card);
       });
+      addCardKebabs(newCards);
       checkLibrary(data.results, grid, newCards);
     }
     store.searchOffset += data.results.length;
-    if (!append) saveSearchState();
+    if (!append) {
+      saveSearchState();
+      addRecentSearch(q);
+      _setKbdActive(-1);
+    }
   } catch (e) {
     if (!append) $('#searchResults').innerHTML = `<div class="empty-state"><p>Search failed: ${e.message}</p></div>`;
   }
@@ -241,19 +376,27 @@ export function init() {
   $('#searchInput').addEventListener('input', () => {
     clearTimeout(store.searchTimeout);
     $('#searchClear').style.display = $('#searchInput').value ? 'block' : 'none';
+    _setKbdActive(-1);
+    renderRecentSearches();
     store.searchTimeout = setTimeout(doSearch, 400);
   });
-  $('#searchInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { clearTimeout(store.searchTimeout); doSearch(); }
+  // Recent-search chips appear when the input is focused and empty.
+  $('#searchInput').addEventListener('focus', renderRecentSearches);
+  $('#searchInput').addEventListener('blur', () => {
+    // Delay so a chip click (which blurs the input) still registers.
+    setTimeout(() => { const w = $('#recentSearches'); if (w) w.style.display = 'none'; }, 150);
   });
+  $('#searchInput').addEventListener('keydown', _handleSearchKeydown);
   $('#searchClear').addEventListener('click', () => {
     $('#searchInput').value = '';
     $('#searchClear').style.display = 'none';
     $('#searchResults').innerHTML = '';
     store.searchQuery = '';
     store.searchHasMore = false;
+    _setKbdActive(-1);
     saveSearchState();
     $('#searchInput').focus();
+    renderRecentSearches();
   });
 
   $$('.type-btn').forEach(btn => {
