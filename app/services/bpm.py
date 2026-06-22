@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 BPM_CACHE_FILE = DATA_DIR / "bpm_analysis.json"
 
-ZOUK_MIN_BPM = 65
-ZOUK_MAX_BPM = 110
+ZOUK_MIN_BPM = 60       # fold window spans exactly one octave (60–120 = 2×) → no dead zone
+ZOUK_MAX_BPM = 120
+BPM_ALGO_VERSION = 2    # bump to invalidate cached/tagged BPM when the algorithm changes
 
 CAMELOT_MAP = {
     "A minor": "8A", "E minor": "9A", "B minor": "10A", "F# minor": "11A",
@@ -45,7 +46,8 @@ def _load_cache() -> dict:
             data = json.loads(BPM_CACHE_FILE.read_text())
             # Invalidate entries from older versions that lack beat_grid/outro_start
             return {k: v for k, v in data.items()
-                    if isinstance(v, dict) and v.get("beat_grid") and v.get("outro_start") is not None}
+                    if isinstance(v, dict) and v.get("beat_grid") and v.get("outro_start") is not None
+                    and v.get("algo_version") == BPM_ALGO_VERSION}
         except Exception:
             pass
     return {}
@@ -64,7 +66,12 @@ def _cache_key(name: str, artist: str) -> str:
 
 
 def normalize_bpm(bpm: float, min_bpm: float = ZOUK_MIN_BPM, max_bpm: float = ZOUK_MAX_BPM) -> float:
-    while bpm > max_bpm: bpm /= 2
+    """Fold a detected tempo into one clean octave [min, max) — a true 2× range, so there
+    is no dead zone where values pass through unfolded. Makes slow and fast zouk tracks
+    land on comparable, sortable BPM values (fixes 'slow song reads higher than fast')."""
+    if bpm <= 0:
+        return bpm
+    while bpm >= max_bpm: bpm /= 2
     while bpm < min_bpm: bpm *= 2
     return bpm
 
@@ -105,7 +112,7 @@ def analyze_bpm(file_path: str) -> dict:
     )
     tempo = librosa.beat.tempo(
         onset_envelope=onset_env, sr=22050, hop_length=HOP,
-        start_bpm=85, std_bpm=1.0, ac_size=8.0, max_tempo=150,
+        start_bpm=85, std_bpm=1.0, ac_size=8.0, max_tempo=120,
     )
     raw["librosa_tempo"] = round(float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo), 1)
     _, beat_frames = librosa.beat.beat_track(
@@ -245,6 +252,7 @@ def analyze_bpm(file_path: str) -> dict:
         "camelot": camelot,
         "intro_end": intro_end,
         "outro_start": outro_start,
+        "algo_version": BPM_ALGO_VERSION,
     }
 
 
@@ -339,9 +347,23 @@ def read_outro_tag(file_path: str) -> float | None:
     return None
 
 
+def read_algover_tag(file_path: str) -> int | None:
+    """Read the BPM algorithm version the file was last analyzed with."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("BPM_ALGO_VER") or tags.get("bpm_algo_ver")
+    if val:
+        try:
+            return int(val[0])
+        except Exception:
+            pass
+    return None
+
+
 def write_tags(file_path: str, bpm: int = None, key: str = None,
                beat_anchor: float = None, intro_end: float = None,
-               outro_start: float = None):
+               outro_start: float = None, algo_ver: int = None):
     """Write BPM, key, beat anchor, intro end, and outro start to file tags."""
     tags, fmt = _open_tags(file_path)
     if not tags:
@@ -382,6 +404,15 @@ def write_tags(file_path: str, bpm: int = None, key: str = None,
                         from mutagen.id3 import TXXX
                         EasyID3.RegisterTXXXKey(lk, tag_name)
                     tags[lk] = str(round(value, 3))
+        if algo_ver is not None:
+            if fmt == "flac":
+                tags["BPM_ALGO_VER"] = str(algo_ver)
+            else:
+                from mutagen.easyid3 import EasyID3
+                if "bpm_algo_ver" not in EasyID3.valid_keys:
+                    from mutagen.id3 import TXXX
+                    EasyID3.RegisterTXXXKey("bpm_algo_ver", "BPM_ALGO_VER")
+                tags["bpm_algo_ver"] = str(algo_ver)
         tags.save()
     except Exception as e:
         logger.error("Failed to write tags to %s: %s", file_path, e)
@@ -408,10 +439,12 @@ def _analyze_or_read_tag(file_path: str) -> dict:
     existing_anchor = read_anchor_tag(file_path)
     existing_intro = read_intro_tag(file_path)
     existing_outro = read_outro_tag(file_path)
+    existing_ver = read_algover_tag(file_path)
 
     if (existing_bpm and existing_key and existing_anchor is not None
-            and existing_intro is not None and existing_outro is not None):
-        # All tags present — reconstruct everything from tags (fast path)
+            and existing_intro is not None and existing_outro is not None
+            and existing_ver == BPM_ALGO_VERSION):
+        # All tags present AND analyzed by the current algorithm — fast path.
         bpm = float(existing_bpm)
         camelot = CAMELOT_MAP.get(existing_key)
         beat_grid, track_duration = _reconstruct_beat_grid(bpm, existing_anchor, file_path)
@@ -423,6 +456,7 @@ def _analyze_or_read_tag(file_path: str) -> dict:
             "beat_positions": beat_grid, "beat_grid": beat_grid,
             "intro_end": existing_intro,
             "outro_start": existing_outro,
+            "algo_version": BPM_ALGO_VERSION,
         }
 
     # Need full analysis (missing tag(s))
@@ -434,7 +468,8 @@ def _analyze_or_read_tag(file_path: str) -> dict:
                key=result.get("key"),
                beat_anchor=anchor,
                intro_end=result.get("intro_end"),
-               outro_start=result.get("outro_start"))
+               outro_start=result.get("outro_start"),
+               algo_ver=BPM_ALGO_VERSION)
     return result
 
 
