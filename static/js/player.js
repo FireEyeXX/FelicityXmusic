@@ -7,6 +7,7 @@ import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
 import { getCachedUrl, waitForCache, prefetchUpcoming, cleanup as prefetchCleanup, pausePrefetch, resumePrefetch } from './prefetch.js';
+import * as cast from './cast.js';
 
 const audio = $('#audioElement');
 function _ab() { return window.AndroidBridge || null; }
@@ -91,18 +92,18 @@ export async function loadAndPlay() {
   const mode = store.deviceOutputMode || 'default';
   // DLNA Only mode: auto-connect to renderer on play
   if (mode === 'dlna_only' && !store.castDevice) {
-    _autoCastAndPlay(item, cleanName, cleanArtist);
+    cast.autoCastAndPlay(item, cleanName, cleanArtist);
   // Cast mode: send to DLNA renderer (unless local-only)
   } else if (store.castDevice && mode !== 'local') {
-    _castSkipAutoAdvance = true;
-    _castTransitioning = true;
+    cast.castState.skipAutoAdvance = true;
+    cast.castState.transitioning = true;
     const castBody = {
       device_id: store.castDevice.id, name: cleanName, artist: cleanArtist,
       album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,
     };
     apiJson('/api/dlna/cast', { method: 'POST', body: castBody })
       .then(() => { /* cast started */ })
-      .catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; _castSkipAutoAdvance = false; });
+      .catch(e => { showToast('Cast failed: ' + (e.message || '')); cast.castState.transitioning = false; cast.castState.skipAutoAdvance = false; });
   } else {
     let cached = getCachedUrl(cleanName, cleanArtist);
     // If prefetch is downloading this track, wait for it (avoids competing parallel stream)
@@ -212,43 +213,6 @@ export function hidePlayerBar() {
   if (_ab()) _ab().onStop();
 }
 
-// ── Cast state ──
-let _castLastState = '';
-let _castLastDur = 0;     // last non-zero duration seen while casting (renderers zero it at STOP)
-let _castLastPos = 0;     // last non-zero position seen while casting
-let _castWasPlaying = false; // latched true while playing; survives the TRANSITIONING blip before STOP
-let _castPollFails = 0;      // consecutive cast-status poll failures (teardown after a few)
-let _castVolTimer = null;    // debounce timer for the cast volume slider
-let _castSkipAutoAdvance = false;
-let _castTransitioning = false;
-let _castTransitionTimer = null;
-// Assigned in init() — needed by loadAndPlay for dlna_only mode
-let _syncCastButtonsFn = () => {};
-let _startCastPollFn = () => {};
-
-async function _autoCastAndPlay(item, cleanName, cleanArtist) {
-  try {
-    const data = await apiJson('/api/dlna/devices');
-    const devices = data.devices || [];
-    if (!devices.length) { showToast('No DLNA devices found. Configure in Settings.'); return; }
-    const savedUrl = store.deviceDlnaRendererUrl || store.appSettings.dlna_renderer_url || '';
-    const device = (savedUrl && devices.find(d => d.location === savedUrl)) || devices[0];
-    store.castDevice = device;
-    _castSkipAutoAdvance = true;
-    _castTransitioning = true;
-    await apiJson('/api/dlna/cast', { method: 'POST', body: {
-      device_id: device.id, name: cleanName, artist: cleanArtist,
-      album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,
-    }});
-    audio.pause();
-    _syncCastButtonsFn('var(--accent)');
-    _startCastPollFn();
-  } catch (e) {
-    _castTransitioning = false;
-    showToast('DLNA auto-cast failed: ' + (e.message || ''));
-  }
-}
-
 // ── Next / Prev ──
 let _lastNextTime = 0;
 export function nextTrack() {
@@ -257,9 +221,7 @@ export function nextTrack() {
   if (now - _lastNextTime < 500) return;
   _lastNextTime = now;
   if (store.castDevice) {
-    _castTransitioning = true;
-    clearTimeout(_castTransitionTimer);
-    _castTransitionTimer = setTimeout(() => { _castTransitioning = false; }, 20000);
+    cast.markCastTransition();
   }
   // If playing a virtual rec track, advance to next rec (both local and cast)
   import('./recommendations.js').then(m => {
@@ -349,12 +311,12 @@ export function playRecTrack(item) {
   const cleanArtist = _decodeEntities(item.artist || '');
   // Cast mode: send to DLNA renderer
   if (store.castDevice) {
-    _castSkipAutoAdvance = true;
-    _castTransitioning = true;
+    cast.castState.skipAutoAdvance = true;
+    cast.castState.transitioning = true;
     apiJson('/api/dlna/cast', { method: 'POST', body: {
       device_id: store.castDevice.id, name: cleanName, artist: cleanArtist,
       album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,
-    }}).catch(e => { showToast('Cast failed: ' + (e.message || '')); _castTransitioning = false; _castSkipAutoAdvance = false; });
+    }}).catch(e => { showToast('Cast failed: ' + (e.message || '')); cast.castState.transitioning = false; cast.castState.skipAutoAdvance = false; });
   } else {
     const cached = getCachedUrl(cleanName, cleanArtist);
     if (cached) {
@@ -394,9 +356,7 @@ function updateMediaSessionWith(item) {
 
 export function prevTrack() {
   if (store.castDevice) {
-    _castTransitioning = true;
-    clearTimeout(_castTransitionTimer);
-    _castTransitionTimer = setTimeout(() => { _castTransitioning = false; }, 20000);
+    cast.markCastTransition();
   }
   // If playing a virtual rec track, go to previous rec or back to queue
   import('./recommendations.js').then(m => {
@@ -695,172 +655,9 @@ export function init() {
     finally { setTimeout(() => { btn.style.color = ''; }, 1000); }
   });
 
-  // Cast button (mini + full player)
-  async function _handleCastClick() {
-    if (store.deviceOutputMode === 'local') return;
-    if (store.castDevice) {
-      // Already casting — stop and return to local
-      await apiJson('/api/dlna/stop', { method: 'POST' }).catch(() => {});
-      store.castDevice = null;
-      clearInterval(store.castPollTimer);
-      store.castPollTimer = null;
-      _syncCastButtons('');
-      showToast('Cast stopped');
-      return;
-    }
-    try {
-      const data = await apiJson('/api/dlna/devices');
-      const devices = data.devices || [];
-      if (!devices.length) { showToast('No DLNA devices found. Configure in Settings.'); return; }
-      // Auto-pick if only one device, or use the configured one from settings
-      if (devices.length === 1) {
-        _castToDevice(devices[0]);
-      } else {
-        // Try to match saved dlna_renderer_url from settings
-        const savedUrl = store.deviceDlnaRendererUrl || store.appSettings.dlna_renderer_url || '';
-        const savedDevice = savedUrl ? devices.find(d => d.location === savedUrl) : null;
-        if (savedDevice) {
-          _castToDevice(savedDevice);
-        } else {
-          // Fallback: use first device
-          _castToDevice(devices[0]);
-        }
-      }
-    } catch (e) {
-      showToast('Cast failed: ' + (e.message || ''));
-    }
-  }
-  $('#playerCastBtn').addEventListener('click', _handleCastClick);
-  if ($('#fpCastBtn')) $('#fpCastBtn').addEventListener('click', _handleCastClick);
-
-  // DLNA cast volume slider
-  const castVolSlider = $('#fpCastVolume');
-  if (castVolSlider) {
-    castVolSlider.addEventListener('input', (e) => {
-      const vol = parseInt(e.target.value);
-      const label = $('#fpCastVolLabel');
-      if (label) label.textContent = vol + '%';
-      if (store.castDevice) {
-        clearTimeout(_castVolTimer);
-        _castVolTimer = setTimeout(() => { if (store.castDevice) apiJson('/api/dlna/volume', { method: 'POST', body: { volume: vol } }).catch(() => {}); }, 150);
-      }
-    });
-  }
-
-  function _syncCastButtons(color) {
-    ['#playerCastBtn', '#fpCastBtn'].forEach(sel => {
-      const btn = $(sel);
-      if (btn) btn.style.color = color;
-    });
-    // Toggle volume sliders: show DLNA volume in cast mode, local volume otherwise
-    const isCasting = color && color !== '';
-    const castVol = $('#fpCastVol');
-    if (castVol) castVol.style.display = isCasting ? '' : 'none';
-    const localVol = document.querySelector('.fp-vol-wrap');
-    if (localVol) localVol.style.display = isCasting ? 'none' : '';
-  }
-
-  async function _castToDevice(device) {
-    const item = store.playerQueue[store.playerIndex];
-    if (!item) return;
-    try {
-      await apiJson('/api/dlna/cast', { method: 'POST', body: {
-        device_id: device.id, name: item.name || '', artist: item.artist || '',
-        album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,
-      }});
-      store.castDevice = device;
-      audio.pause();
-      _syncCastButtons('var(--accent)');
-      showToast(`Casting to ${device.name}`);
-      _startCastPoll();
-    } catch (e) {
-      showToast('Cast failed: ' + (e.message || ''));
-    }
-  }
-
-  // Cast state vars are module-level (see above init)
-  async function _startCastPoll() {
-    clearInterval(store.castPollTimer);
-    _castLastState = '';
-    _castLastDur = 0;
-    _castLastPos = 0;
-    _castWasPlaying = false;
-    _castPollFails = 0;
-    store.castPollTimer = setInterval(async () => {
-      if (!store.castDevice) { clearInterval(store.castPollTimer); return; }
-      if (store.deviceOutputMode === 'local') {
-        // User switched to local output mid-cast — stop the renderer and end the poll.
-        store.castDevice = null; _syncCastButtons(''); clearInterval(store.castPollTimer);
-        apiJson('/api/dlna/stop', { method: 'POST' }).catch(() => {});
-        return;
-      }
-      try {
-        const status = await apiJson('/api/dlna/status');
-        if (status.stale) return; // transient backend query failure — skip tick, keep last state
-        if (!status.active && !_castTransitioning) {
-          // Check if backend is transitioning (track change in progress)
-          if (status.state === 'TRANSITIONING') return;
-          store.castDevice = null; _syncCastButtons(''); clearInterval(store.castPollTimer); return;
-        }
-        const dur = status.duration_seconds || 0;
-        const pos = status.position_seconds || 0;
-        if (dur > 0) {
-          const pct = (pos / dur) * 100;
-          $('#playerProgressFill').style.width = pct + '%';
-          document.getElementById('playerBar').style.setProperty('--player-progress', pct + '%');
-          const fpFill = $('#fpProgressFill');
-          if (fpFill) fpFill.style.width = pct + '%';
-        }
-        $('#playerTimeCurrent').textContent = fmtTime(pos);
-        $('#playerTimeTotal').textContent = fmtTime(dur);
-        const fpCur = $('#fpTimeCurrent');
-        if (fpCur) fpCur.textContent = fmtTime(pos);
-        const fpTot = $('#fpTimeTotal');
-        if (fpTot) fpTot.textContent = fmtTime(dur);
-        // Sync cast volume slider
-        if (status.volume !== undefined) {
-          const cvs = $('#fpCastVolume');
-          const cvl = $('#fpCastVolLabel');
-          if (cvs && !cvs.matches(':active')) { cvs.value = status.volume; }
-          if (cvl) cvl.textContent = status.volume + '%';
-        }
-        // Detect track end. The Onkyo goes PLAYING → TRANSITIONING → STOPPED and zeros
-        // position (keeps duration) at STOP, so we (a) LATCH "was playing" across the
-        // TRANSITIONING blip and (b) compare against the last good position/duration
-        // captured while playing — never the zeroed stopped frame.
-        const state = (status.state || '').toLowerCase();
-        if (state.includes('playing')) {
-          _castSkipAutoAdvance = false;
-          _castTransitioning = false;
-          _castWasPlaying = true;
-          if (dur > 0) _castLastDur = dur;
-          if (pos > 0) _castLastPos = pos;
-        }
-        // Auto-advance on a real end-of-track: we were playing (possibly via TRANSITIONING),
-        // now stopped/no_media, observed real progress, and reached near the end. If the
-        // duration is unknown, advance on any playing→stopped after progress.
-        const ended = _castWasPlaying && (state.includes('stopped') || state.includes('no_media'));
-        const sawProgress = _castLastPos > 1;
-        const nearEnd = _castLastDur === 0 || _castLastPos >= _castLastDur - 12;
-        if (!_castSkipAutoAdvance && ended && sawProgress && nearEnd) {
-          _castWasPlaying = false; _castLastPos = 0; _castLastDur = 0;
-          nextTrack();
-        }
-        _castLastState = state;
-        _castPollFails = 0;
-      } catch {
-        // Tolerate transient status errors; tear down only after sustained failure.
-        if (++_castPollFails >= 5) {
-          _castPollFails = 0; store.castDevice = null; _syncCastButtons('');
-          clearInterval(store.castPollTimer);
-        }
-      }
-    }, 2000);
-  }
-
-  // Expose for module-level _autoCastAndPlay
-  _syncCastButtonsFn = _syncCastButtons;
-  _startCastPollFn = _startCastPoll;
+  // ── Cast (DLNA) — shared module (cast.js) ──
+  cast.initCast({ getAudioEl: getAudio, nextTrack });
+  cast.wireControls();
 
   // Play button on cards (event delegation)
   document.addEventListener('click', async (e) => {
