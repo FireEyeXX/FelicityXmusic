@@ -214,6 +214,9 @@ export function hidePlayerBar() {
 
 // ── Cast state ──
 let _castLastState = '';
+let _castLastDur = 0;     // last non-zero duration seen while casting (renderers zero it at STOP)
+let _castLastPos = 0;     // last non-zero position seen while casting
+let _castWasPlaying = false; // latched true while playing; survives the TRANSITIONING blip before STOP
 let _castSkipAutoAdvance = false;
 let _castTransitioning = false;
 let _castTransitionTimer = null;
@@ -771,10 +774,14 @@ export function init() {
   async function _startCastPoll() {
     clearInterval(store.castPollTimer);
     _castLastState = '';
+    _castLastDur = 0;
+    _castLastPos = 0;
+    _castWasPlaying = false;
     store.castPollTimer = setInterval(async () => {
       if (!store.castDevice) { clearInterval(store.castPollTimer); return; }
       try {
         const status = await apiJson('/api/dlna/status');
+        if (status.stale) return; // transient backend query failure — skip tick, keep last state
         if (!status.active && !_castTransitioning) {
           // Check if backend is transitioning (track change in progress)
           if (status.state === 'TRANSITIONING') return;
@@ -802,16 +809,26 @@ export function init() {
           if (cvs && !cvs.matches(':active')) { cvs.value = status.volume; }
           if (cvl) cvl.textContent = status.volume + '%';
         }
-        // Detect track end: state changed from playing to stopped/no_media
+        // Detect track end. The Onkyo goes PLAYING → TRANSITIONING → STOPPED and zeros
+        // position (keeps duration) at STOP, so we (a) LATCH "was playing" across the
+        // TRANSITIONING blip and (b) compare against the last good position/duration
+        // captured while playing — never the zeroed stopped frame.
         const state = (status.state || '').toLowerCase();
         if (state.includes('playing')) {
           _castSkipAutoAdvance = false;
           _castTransitioning = false;
+          _castWasPlaying = true;
+          if (dur > 0) _castLastDur = dur;
+          if (pos > 0) _castLastPos = pos;
         }
-        // Only auto-advance if position is near end of track (not just a buffer glitch)
-        const nearEnd = dur > 0 && pos >= dur - 5;
-        if (!_castSkipAutoAdvance && _castLastState.includes('playing') &&
-            (state.includes('stopped') || state.includes('no_media')) && nearEnd) {
+        // Auto-advance on a real end-of-track: we were playing (possibly via TRANSITIONING),
+        // now stopped/no_media, observed real progress, and reached near the end. If the
+        // duration is unknown, advance on any playing→stopped after progress.
+        const ended = _castWasPlaying && (state.includes('stopped') || state.includes('no_media'));
+        const sawProgress = _castLastPos > 1;
+        const nearEnd = _castLastDur === 0 || _castLastPos >= _castLastDur - 12;
+        if (!_castSkipAutoAdvance && ended && sawProgress && nearEnd) {
+          _castWasPlaying = false; _castLastPos = 0; _castLastDur = 0;
           nextTrack();
         }
         _castLastState = state;

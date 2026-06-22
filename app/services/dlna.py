@@ -248,6 +248,9 @@ async def cast_to_device(session_key: str, device_id: str, name: str, artist: st
     session["generation"] += 1
     my_gen = session["generation"]
     session["transitioning"] = True
+    # Remember the client-provided duration — renderers (Onkyo) often report
+    # TrackDuration=0/NOT_IMPLEMENTED, so get_status falls back to this.
+    session["duration_seconds"] = (duration_ms / 1000) if duration_ms else 0
 
     async with session["lock"]:
         if my_gen != session["generation"]:
@@ -417,10 +420,12 @@ async def get_status(session_key: str) -> dict | None:
                     "position_seconds": 0, "duration_seconds": 0, "volume": 0}
         return None
     dmr = session["dmr"]
+    sess_dur = session.get("duration_seconds", 0)
     try:
         info = {
             "device": session["device"]["name"],
             "state": "unknown",
+            "transport_status": "",
             "position_seconds": 0,
             "duration_seconds": 0,
             "volume": 0,
@@ -434,13 +439,14 @@ async def get_status(session_key: str) -> dict | None:
         if av_srv:
             try:
                 ti = av_srv.action("GetTransportInfo")
-                result = await ti.async_call(InstanceID=0)
+                result = await asyncio.wait_for(ti.async_call(InstanceID=0), timeout=3)
                 info["state"] = result.get("CurrentTransportState", "unknown")
+                info["transport_status"] = result.get("CurrentTransportStatus", "")
             except Exception:
                 pass
             try:
                 pi = av_srv.action("GetPositionInfo")
-                result = await pi.async_call(InstanceID=0)
+                result = await asyncio.wait_for(pi.async_call(InstanceID=0), timeout=3)
                 info["position_seconds"] = _parse_time(result.get("RelTime", "0:00:00"))
                 info["duration_seconds"] = _parse_time(result.get("TrackDuration", "0:00:00"))
             except Exception:
@@ -449,14 +455,26 @@ async def get_status(session_key: str) -> dict | None:
         if rc_srv:
             try:
                 gv = rc_srv.action("GetVolume")
-                result = await gv.async_call(InstanceID=0, Channel="Master")
+                result = await asyncio.wait_for(gv.async_call(InstanceID=0, Channel="Master"), timeout=3)
                 info["volume"] = int(result.get("CurrentVolume", 0))
             except Exception:
                 pass
 
+        # Fall back to the client-provided duration when the renderer reports none.
+        if not info["duration_seconds"] and sess_dur:
+            info["duration_seconds"] = sess_dur
+        session["stale_count"] = 0
         return info
     except Exception:
-        return None
+        # Transient query failure — keep the session ALIVE for a few ticks (returning
+        # None makes the frontend tear the cast down mid-playlist). But after sustained
+        # failure (renderer powered off / crashed) allow teardown so the UI recovers.
+        session["stale_count"] = session.get("stale_count", 0) + 1
+        if session["stale_count"] >= 5:
+            return None
+        return {"device": session["device"]["name"], "state": "unknown",
+                "transport_status": "", "position_seconds": 0,
+                "duration_seconds": sess_dur, "volume": 0, "stale": True}
 
 
 def _build_didl_metadata(title: str, artist: str, album: str, image: str,
