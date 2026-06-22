@@ -367,65 +367,140 @@ export function scheduleDjTransition(ctx, outDeck, inDeck, outData, inData, opts
  * @param {string} mode - 'bpm' or 'bpm_key'
  * @returns {number|null} - Best index, or null if no analyzed candidates
  */
-// Track which indices have already been played by Smart Queue
-const _playedIndices = new Set();
+// Track which tracks have already been played by Smart Queue.
+// Keyed by track IDENTITY (id, or artist:name) — NOT array index — so the played
+// set stays correct when the queue is reordered or edited mid-set.
+const _playedKeys = new Set();
+
+/**
+ * Stable identity key for a queue item.
+ * Prefers a track id; falls back to a lowercased artist:name pair
+ * (mirrors the name+artist keying bpm.js uses for its DJ-data cache).
+ * @param {object} item - Queue item { id?, name?, artist? }
+ * @returns {string}
+ */
+function _trackKey(item) {
+  return item.id != null
+    ? String(item.id)
+    : ((item.artist || '') + ':' + (item.name || '')).toLowerCase();
+}
 
 /** Reset played tracking (call when queue changes or playback restarts) */
-export function resetSmartQueuePlayed() { _playedIndices.clear(); }
+/** Stable non-negative hash of a string (djb2) — used for deterministic per-track jitter. */
+function _keyHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
 
-/** Mark current index as played */
-export function markPlayed(idx) { _playedIndices.add(idx); }
+export function resetSmartQueuePlayed() { _playedKeys.clear(); }
 
-// NOTE: side-effect-free — does NOT mutate _playedIndices, so it is safe to call for
+/** Mark a queue item as played (pass the item, not an index) */
+export function markPlayed(item) { if (item) _playedKeys.add(_trackKey(item)); }
+
+// NOTE: side-effect-free — does NOT mutate _playedKeys, so it is safe to call for
 // prediction (prefetch) and again at commit without desyncing played-state. The caller
 // marks the outgoing track via markPlayed() only on a real advance.
 export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', repeatAll = false) {
   if (!currentDjData || !currentDjData.bpm) return null;
 
+  // ---- Scoring tunables (BPM-equivalent units) ----
+  const TRUST_FLOOR = 0.5;   // below this confidence, treat candidate BPM as UNKNOWN
+  const BAND = 8;            // preferred tempo window (BPM) around the target
+  const RAMP = 0;           // soft tempo target offset: target = curBpm + RAMP (gentle for zouk)
+  const CONF_PENALTY = 8;   // BPM-equiv cost for full uncertainty: (1 - conf) * CONF_PENALTY
+  const JITTER = 1.5;       // small random tie-break (BPM-equiv) so the set isn't deterministic
+
   const curBpm = currentDjData.bpm;
   const curCamelot = currentDjData.camelot;
-  let bestIdx = null;
-  let bestScore = Infinity;
+  const target = curBpm + RAMP;
+
+  // Distinct number of track keys in the queue (duplicates collapse).
+  const distinctKeys = new Set(queue.map(_trackKey));
+  const allPlayed = _playedKeys.size >= distinctKeys.size;
+
+  /** Key-bonus (subtracted from score) for harmonic compatibility. */
+  const keyBonus = (data) => {
+    if (mode === 'bpm_key' && curCamelot && data.camelot) {
+      const style = getTransitionStyle(curCamelot, data.camelot);
+      if (style === 'blend') return 3;
+      if (style === 'bass_swap') return 1;
+    }
+    return 0;
+  };
+
+  // Collect eligible trusted candidates, tracking in-band membership.
+  const trusted = []; // { idx, score, inBand }
+  let untrustedPool = false; // any eligible candidate at all with unknown/low-conf BPM
 
   for (let i = 0; i < queue.length; i++) {
     if (i === currentIndex) continue;
-    // Skip already-played tracks (unless repeat=all AND all have been played)
-    if (_playedIndices.has(i) && !repeatAll) continue;
-    if (_playedIndices.has(i) && repeatAll && _playedIndices.size < queue.length) continue;
-
     const item = queue[i];
+    const key = _trackKey(item);
+    // Skip already-played tracks, unless repeat=all and EVERYTHING has been played.
+    if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
+
     const data = getDjData(item.name, item.artist);
-    if (!data || !data.bpm) continue;
+    if (!data || !data.bpm) { untrustedPool = true; continue; }
 
-    let score = Math.abs(data.bpm - curBpm);
+    const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
+    if (conf < TRUST_FLOOR) { untrustedPool = true; continue; }
 
-    if (mode === 'bpm_key' && curCamelot && data.camelot) {
-      const style = getTransitionStyle(curCamelot, data.camelot);
-      if (style === 'blend') score -= 3;
-      else if (style === 'bass_swap') score -= 1;
-    }
-
-    if (score < bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
+    // Deterministic per-track jitter (NOT Math.random): pickSmartNext runs once at
+    // prediction time (to prefetch) and again at commit; a re-rolled random term would
+    // let the two diverge → wrong track prefetched / stale _inDjData. A stable hash of
+    // the track key gives variety across tracks while staying identical across calls.
+    const jitter = (_keyHash(key) % 1000) / 1000 * JITTER;
+    const score = Math.abs(data.bpm - target)
+      + (1 - conf) * CONF_PENALTY
+      - keyBonus(data)
+      + jitter;
+    const inBand = Math.abs(data.bpm - target) <= BAND;
+    trusted.push({ idx: i, score, inBand });
   }
 
-  // If nothing found (all played, repeat=off), return null → queue ends
-  // If repeat=all and all played, clear history and try again
-  if (bestIdx == null && repeatAll && _playedIndices.size >= queue.length) {
-    _playedIndices.clear();
-    _playedIndices.add(currentIndex);
+  if (trusted.length) {
+    // Prefer in-band trusted candidates; if none, consider all trusted.
+    const inBand = trusted.filter(c => c.inBand);
+    const pool = inBand.length ? inBand : trusted;
+    let best = pool[0];
+    for (const c of pool) if (c.score < best.score) best = c;
+    return best.idx;
+  }
+
+  // ---- Fallback: no trusted candidate. ----
+  // If repeat=all and everything has been played, clear history and retry.
+  if (repeatAll && allPlayed && !untrustedPool) {
+    // Guard against infinite recursion when there is nothing to cycle to (e.g. queue
+    // edited down to a single already-played track). Without this, clearing + re-adding
+    // the current key leaves allPlayed true with zero candidates → unbounded recursion.
+    if (distinctKeys.size <= 1) return null;
+    _playedKeys.clear();
+    const cur = queue[currentIndex];
+    if (cur) _playedKeys.add(_trackKey(cur));
     return pickSmartNext(queue, currentIndex, currentDjData, mode, repeatAll);
   }
-  // Fallback: no BPM/key match found, but unplayed tracks remain (e.g. not yet
-  // analyzed) — advance sequentially instead of silently ending the queue.
-  if (bestIdx == null) {
-    for (let i = currentIndex + 1; i < queue.length; i++) {
-      if (!_playedIndices.has(i)) { bestIdx = i; break; }
+
+  // Whole-queue fallback: any unplayed track anywhere (not forward-only), so the set
+  // doesn't dead-end while earlier tracks remain unplayed. Prefer ones with trusted
+  // in-band BPM if available, else first unplayed.
+  let fallbackIdx = null;
+  let fallbackInBandIdx = null;
+  for (let i = 0; i < queue.length; i++) {
+    if (i === currentIndex) continue;
+    const item = queue[i];
+    const key = _trackKey(item);
+    if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
+    if (fallbackIdx == null) fallbackIdx = i;
+    if (fallbackInBandIdx == null) {
+      const data = getDjData(item.name, item.artist);
+      if (data && data.bpm) {
+        const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
+        if (conf >= TRUST_FLOOR && Math.abs(data.bpm - target) <= BAND) fallbackInBandIdx = i;
+      }
     }
   }
-  return bestIdx;
+  return fallbackInBandIdx != null ? fallbackInBandIdx : fallbackIdx;
 }
 
 /**

@@ -558,7 +558,7 @@ function _nextTrackInQueue() {
     if (smartMode !== 'off' && _outDjData) {
       const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       if (smartIdx != null) {
-        markPlayed(store.playerIndex); // pickSmartNext is side-effect-free; mark on real advance
+        markPlayed(store.playerQueue[store.playerIndex]); // pickSmartNext is side-effect-free; mark outgoing item on real advance
         store.playerIndex = smartIdx;
         loadAndPlay();
         return;

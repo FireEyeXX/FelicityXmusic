@@ -46,20 +46,24 @@ function _decodeEntities(s) {
   return el.value;
 }
 
-// Always decode entities before building key — ensures loadAndPlay lookups match
-function _key(name, artist) {
+// Always decode entities before building key — ensures loadAndPlay lookups match.
+// Prefer a stable track id when present (avoids same-title/remix collisions); fall
+// back to the decoded artist:name pair. id is threaded as an optional 3rd arg so
+// prefetch-time and consume-time keys match — both sides MUST pass the same id.
+function _key(name, artist, id) {
+  if (id != null) return `id:${id}`;
   return `${_decodeEntities((artist || '')).toLowerCase().trim()}:${_decodeEntities((name || '')).toLowerCase().trim()}`;
 }
 
 /** Return cached blob URL if available, or null. */
-export function getCachedUrl(name, artist) {
-  const entry = _cache.get(_key(name, artist));
+export function getCachedUrl(name, artist, id) {
+  const entry = _cache.get(_key(name, artist, id));
   return entry ? entry.blobUrl : null;
 }
 
 /** If track is currently being prefetched, wait for it (max 10s). Returns blob URL or null. */
-export async function waitForCache(name, artist, timeoutMs = 10000) {
-  const key = _key(name, artist);
+export async function waitForCache(name, artist, timeoutMs = 10000, id) {
+  const key = _key(name, artist, id);
   // Already cached
   if (_cache.has(key)) return _cache.get(key).blobUrl;
   // Not being fetched — can't wait
@@ -78,8 +82,8 @@ export async function waitForCache(name, artist, timeoutMs = 10000) {
 }
 
 /** Get prefetch status for a track. */
-export function getStatus(name, artist) {
-  const key = _key(name, artist);
+export function getStatus(name, artist, id) {
+  const key = _key(name, artist, id);
   if (_cache.has(key)) return { state: 'ready', progress: 100 };
   const f = _fetching.get(key);
   if (f) return { state: 'loading', progress: f.progress || 0 };
@@ -88,14 +92,14 @@ export function getStatus(name, artist) {
 }
 
 /** Prefetch a specific track at front of queue (for Smart Queue). */
-export function prefetchTrack(name, artist) {
+export function prefetchTrack(name, artist, id) {
   if (store.castDevice || _paused) return;
-  const key = _key(name, artist);
+  const key = _key(name, artist, id);
   if (_cache.has(key) || _fetching.has(key)) return;
   // Remove from queue if already there, re-add at front
   const idx = _queue.findIndex(q => q.key === key);
   if (idx >= 0) _queue.splice(idx, 1);
-  _queue.unshift({ item: { name, artist }, key, priority: 0 });
+  _queue.unshift({ item: { name, artist, id }, key, priority: 0 });
   _processNext();
 }
 
@@ -114,7 +118,7 @@ function _fillQueue() {
 function _fillQueueFrom(queue, currentIndex, count) {
   for (let i = currentIndex + 1; i < queue.length && i <= currentIndex + count; i++) {
     const item = queue[i];
-    const key = _key(item.name, item.artist);
+    const key = _key(item.name, item.artist, item.id);
     if (_cache.has(key) || _fetching.has(key) || _queue.some(q => q.key === key)) continue;
     _queue.push({ item, key, priority: i - currentIndex });
   }
@@ -168,6 +172,9 @@ async function _startFetch(entry) {
     // Reject suspiciously small bodies — an error page/JSON served as octet-stream
     // with HTTP 200 would otherwise poison the cache for the full 4h stream TTL.
     if (blob.size < 10240) { _fetching.delete(entry.key); _processNext(); return; }
+    // Aborted mid-flight (skip/clear deleted the _fetching entry): don't poison the
+    // cache with a blob for an already-skipped track, and don't leak the object URL.
+    if (controller.signal.aborted || !_fetching.has(entry.key)) { _processNext(); return; }
     _cache.set(entry.key, { blobUrl: URL.createObjectURL(blob) });
     state.progress = 100;
   } catch (e) {
@@ -186,7 +193,7 @@ export function cleanup(queue, currentIndex) {
   const lo = Math.max(0, currentIndex - 2);
   const hi = Math.min(queue.length - 1, currentIndex + count + 2);
   for (let i = lo; i <= hi; i++) {
-    keepKeys.add(_key(queue[i].name, queue[i].artist));
+    keepKeys.add(_key(queue[i].name, queue[i].artist, queue[i].id));
   }
   for (const [k] of _fetching) keepKeys.add(k);
   for (const q of _queue) keepKeys.add(q.key);

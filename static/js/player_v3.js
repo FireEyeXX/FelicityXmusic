@@ -56,6 +56,26 @@ let _expectedSrcA = '';
 let _expectedSrcB = '';
 let _crossfadeTriggered = false;
 
+// Single in-flight latch for ALL advance entrypoints (auto/ended/error/user/nextTrack).
+// loadAndPlay→deck-swap is async while timeupdate/ended keep firing, so without this a
+// SECOND advance can fire before the first swaps the active deck → double advance /
+// overlapping crossfades. Set synchronously at the START of every advance entrypoint,
+// cleared inside loadAndPlay on ALL exit paths (success, early return, error) so the
+// player can never get permanently stuck. Additional to (not a replacement for) the
+// existing reason==='user' time throttle.
+let _advanceInFlight = false;
+
+// Smart Queue prediction binding: _preAnalyzeUpcoming predicts the next index and
+// prefetches it; _nextTrackInQueue reuses that prediction at commit (if still valid)
+// instead of recomputing pickSmartNext, so the prefetched track is the one we play.
+let _predictedNextIdx = null;
+let _predictedNextKey = null;
+
+// Generation counter for _preAnalyzeUpcoming — bumped each invocation so a stale async
+// run (rapid skip) can detect it was superseded after each await and bail before it
+// clobbers _inDjData / _predictedNextIdx / prefetch.
+let _analyzeGen = 0;
+
 // DJ settings from localStorage (read fresh each call)
 function _djSetting(key, def) { return localStorage.getItem(`ms_dj_${key}`) || def; }
 function _crossfadeDur() { return parseInt(_djSetting('crossfade_sec', '5')) || 5; }
@@ -119,6 +139,40 @@ function _deckDesc(deckEl) {
     highFilter: nodes.high,
     sweepFilter: nodes.sweep,
   };
+}
+
+// Pause mid-fade: the fade timers (setTimeout, wall-clock) and WebAudio gain ramps
+// (ctx.currentTime) keep advancing while paused, so on resume the gains/rates are wrong
+// (jarring). Rather than snapshot/reschedule, finalize the crossfade NOW to a clean
+// single-deck state — the swapped-in (active) deck becomes the sole deck at full gain.
+// Returns the active deck so the caller can pause it. Safe to call when not crossfading.
+function _finalizeCrossfadeOnPause() {
+  if (!_crossfading) return _activeDeckEl();
+  _teardownCrossfade();
+  // The active deck was already swapped to the incoming track in _startCrossfade.
+  if (_fadingOutDeck) {
+    resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
+    _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
+  }
+  _crossfading = false;
+  const active = _activeDeckEl();
+  active.playbackRate = 1.0;
+  const g = _activeGain();
+  if (g) { g.gain.cancelScheduledValues(0); g.gain.value = 1; }
+  // The surviving deck went through scheduleDjTransitionV3, which ramps its EQ bands
+  // and sweep filter; teardown froze them mid-transition. Neutralize them (gain stays 1)
+  // so the resumed track isn't left with a bass cut / active highpass sweep.
+  const n = _activeNodes();
+  for (const f of [n.low, n.mid, n.high]) {
+    if (f) { f.gain.cancelScheduledValues(0); f.gain.value = 0; }
+  }
+  if (n.sweep) {
+    n.sweep.frequency.cancelScheduledValues(0);
+    n.sweep.type = 'highpass';
+    n.sweep.frequency.value = 20; // fully open
+    n.sweep.Q.value = 0.7;
+  }
+  return active;
 }
 
 function _startCrossfade(seekable = true) {
@@ -239,12 +293,17 @@ function _startCrossfade(seekable = true) {
 async function _preAnalyzeUpcoming() {
   const PRE_ANALYZE = parseInt(_djSetting('pre_analyze', '10')) || 10;
   const smartMode = _djSetting('smart_queue', 'off');
+  // Generation token: a rapid skip bumps _analyzeGen, so a stale invocation can detect
+  // it was superseded after each await and bail before clobbering _inDjData /
+  // _predictedNextIdx / prefetch with data for the wrong (already-skipped) track.
+  const gen = ++_analyzeGen;
 
   // Step 1: Ensure _outDjData is loaded (block until ready — needed for everything)
   if (!_outDjData) {
     const cur = store.playerQueue[store.playerIndex];
     if (cur) {
       const d = await fetchDjData(_decodeEntities(cur.name || ''), _decodeEntities(cur.artist || '')).catch(() => null);
+      if (gen !== _analyzeGen) return; // superseded by a newer run
       if (d) _outDjData = d;
     }
   }
@@ -254,42 +313,58 @@ async function _preAnalyzeUpcoming() {
   if (seqNext) {
     const name = _decodeEntities(seqNext.name || '');
     const artist = _decodeEntities(seqNext.artist || '');
-    if (!getDjData(name, artist)) await fetchDjData(name, artist).catch(() => null);
+    if (!getDjData(name, artist)) { await fetchDjData(name, artist).catch(() => null); if (gen !== _analyzeGen) return; }
     // Set _inDjData early so crossfade has data even if smart queue changes it later
     if (!_inDjData) _inDjData = getDjData(name, artist);
-    prefetchTrack(name, artist);
+    resumePrefetch();             // C5: clear _paused so prefetchTrack isn't a no-op in smart mode
+    prefetchTrack(name, artist, seqNext.id);
   }
 
-  // Step 3: Analyze remaining forward tracks for Smart Queue candidate pool
+  // Step 3: Analyze remaining forward (and, for Smart Queue, backward) tracks for the
+  // candidate pool. Collect the target indices, then fetch in concurrency-4 chunks
+  // (mirrors the batch pattern in bpm.js addScanButton) instead of one-at-a-time.
+  const toAnalyze = [];
   for (let i = 2; i <= PRE_ANALYZE; i++) {
     const idx = store.playerIndex + i;
     if (idx >= store.playerQueue.length) break;
-    const item = store.playerQueue[idx];
-    const name = _decodeEntities(item.name || '');
-    const artist = _decodeEntities(item.artist || '');
-    if (getDjData(name, artist)) continue;
-    await fetchDjData(name, artist).catch(() => null);
+    toAnalyze.push(idx);
   }
   // Backward: previous tracks (when Smart Queue searches whole playlist)
   if (smartMode !== 'off') {
     for (let i = store.playerIndex - 1; i >= Math.max(0, store.playerIndex - PRE_ANALYZE); i--) {
-      const item = store.playerQueue[i];
-      const name = _decodeEntities(item.name || '');
-      const artist = _decodeEntities(item.artist || '');
-      if (getDjData(name, artist)) continue;
-      await fetchDjData(name, artist).catch(() => null);
+      toAnalyze.push(i);
     }
   }
+  const analyzeOne = async (idx) => {
+    const item = store.playerQueue[idx];
+    const name = _decodeEntities(item.name || '');
+    const artist = _decodeEntities(item.artist || '');
+    if (getDjData(name, artist)) return;
+    await fetchDjData(name, artist).catch(() => null);
+  };
+  const CONCURRENT = 4;
+  for (let i = 0; i < toAnalyze.length; i += CONCURRENT) {
+    const batch = toAnalyze.slice(i, i + CONCURRENT);
+    await Promise.all(batch.map(analyzeOne));
+    if (gen !== _analyzeGen) return; // superseded mid-scan — don't predict/prefetch
+  }
 
-  // Step 4: Predict Smart Queue pick and update _inDjData + prefetch
+  // Step 4: Predict Smart Queue pick, store the prediction (so commit reuses it),
+  // update _inDjData + prefetch.
   if (smartMode !== 'off' && !store.shuffleEnabled && _outDjData) {
     const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
+    if (gen !== _analyzeGen) return; // superseded — don't bind a stale prediction
     if (smartIdx != null) {
       const item = store.playerQueue[smartIdx];
       const name = _decodeEntities(item.name || '');
       const artist = _decodeEntities(item.artist || '');
+      // C1: record what we predicted+prefetched so _nextTrackInQueue reuses this exact
+      // index at commit instead of recomputing (and possibly diverging → non-gapless).
+      _predictedNextIdx = smartIdx;
+      _predictedNextKey = _smartKey(item);
       _inDjData = getDjData(name, artist);
-      prefetchTrack(name, artist);
+      resumePrefetch();           // C5: ensure prefetch isn't paused in smart mode
+      prefetchTrack(name, artist, item.id);
     }
   }
 }
@@ -323,6 +398,27 @@ function _waitForBuffer(deck) {
       setTimeout(check, 500);
     };
     setTimeout(check, 500); // first check after 500ms
+  });
+}
+
+/** Resolve once the deck can begin playback (readyState >= HAVE_CURRENT_DATA) or after
+ *  timeoutMs — whichever first. Used to gate the fade-in on an uncached live stream so
+ *  the fade doesn't play silence at readyState 0. Never stalls: always resolves. */
+function _waitForCanPlay(deck, timeoutMs = 2500) {
+  return new Promise(resolve => {
+    if (deck.readyState >= 2) { resolve(); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      deck.removeEventListener('canplay', finish);
+      deck.removeEventListener('loadeddata', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    deck.addEventListener('canplay', finish, { once: true });
+    deck.addEventListener('loadeddata', finish, { once: true });
   });
 }
 
@@ -390,8 +486,21 @@ export function addToQueue(items, playNow = false) {
 }
 
 // ── Load and Play Current Track ──
+// Thin guard: guarantees the advance latch is released on EVERY exit of the impl —
+// including a synchronous throw — so an exception can never permanently wedge
+// _advanceInFlight (which would silently block all future track advances).
 export async function loadAndPlay() {
-  if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
+  try {
+    return await _loadAndPlayImpl();
+  } finally {
+    _advanceInFlight = false;
+  }
+}
+
+async function _loadAndPlayImpl() {
+  if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) {
+    return;
+  }
   // Abort prefetch downloads — current track gets all bandwidth
   abortPrefetch();
   _crossfadeTriggered = false;
@@ -414,6 +523,16 @@ export async function loadAndPlay() {
     cast.autoCastAndPlay(item, cleanName, cleanArtist);
   // Cast mode: send to DLNA renderer (unless local-only)
   } else if (store.castDevice && mode !== 'local') {
+    // If a local crossfade/playback is in progress, tear it down and silence BOTH
+    // local decks first — otherwise they keep playing alongside the cast renderer
+    // (double audio). _teardownCrossfade clears all fade timers/ramps/beat-sync.
+    if (_crossfading || !_activeDeckEl().paused) {
+      _teardownCrossfade();
+      _deckA.pause();
+      _deckB.pause();
+      _fadingOutDeck = null;
+      _crossfading = false;
+    }
     cast.castState.skipAutoAdvance = true;
     cast.castState.transitioning = true;
     const castBody = {
@@ -431,21 +550,45 @@ export async function loadAndPlay() {
     const currentDeck = _activeDeckEl();
     if (!currentDeck.paused && currentDeck.src) {
       // Crossfade: use cache if ready, brief wait if almost done, else stream
-      let cached = getCachedUrl(cleanName, cleanArtist);
-      if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 2000); if (w) cached = w; }
+      let cached = getCachedUrl(cleanName, cleanArtist, item.id);
+      if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 2000, item.id); if (w) cached = w; }
       const src = cached || streamUrl;
       pausePrefetch();
+      // Resolve the incoming track's DJ data SYNCHRONOUSLY from the cache so the beat
+      // grid is available at fade time. _startCrossfade does _outDjData=_inDjData;
+      // _inDjData=null synchronously, so an async fetchDjData().then() would not have
+      // resolved yet → beat-sync silently disabled. Keep the async fetch as cache warmup.
+      const inData = getDjData(cleanName, cleanArtist);
+      if (inData) _inDjData = inData;
       if (!_inDjData) {
         fetchDjData(cleanName, cleanArtist).then(d => { _inDjData = d; }).catch(() => {});
       }
-      // IMPORTANT: call _startCrossfade BEFORE setting src on the next deck.
-      // _startCrossfade's rapid-skip handler clears _fadingOutDeck.src, and during
-      // a rapid skip _fadingOutDeck IS the inactive deck we're about to load.
-      // If we set src first, the rapid-skip handler would clear it, causing silence.
-      _startCrossfade(!!cached); // pass seekable flag — also swaps _activeDeck
-      const nextDeck = _activeDeckEl(); // after swap, the NEW active deck is the one to load
-      _setDeckSrc(nextDeck, src);
-      nextDeck.play().catch(() => {});
+      if (cached) {
+        // IMPORTANT: call _startCrossfade BEFORE setting src on the next deck.
+        // _startCrossfade's rapid-skip handler clears _fadingOutDeck.src, and during
+        // a rapid skip _fadingOutDeck IS the inactive deck we're about to load.
+        // If we set src first, the rapid-skip handler would clear it, causing silence.
+        _startCrossfade(true); // cached blob = seekable — also swaps _activeDeck
+        const nextDeck = _activeDeckEl(); // after swap, the NEW active deck is the one to load
+        _setDeckSrc(nextDeck, src);
+        nextDeck.play().catch(() => {});
+      } else {
+        // Uncached live stream: load on the inactive deck and wait for it to buffer a
+        // little BEFORE fading in, or the fade-in plays silence (readyState 0). Bounded
+        // wait — proceed anyway on timeout so playback never stalls.
+        // Finalize any prior crossfade FIRST: _startCrossfade's rapid-skip handler would
+        // otherwise clear this inactive deck's src after we've loaded it (silence).
+        if (_crossfading && _fadingOutDeck) {
+          resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
+          _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
+          _teardownCrossfade(); _crossfading = false;
+        }
+        const nextDeck = _inactiveDeckEl();
+        _setDeckSrc(nextDeck, src);
+        nextDeck.play().catch(() => {});
+        await _waitForCanPlay(nextDeck, 2500);
+        _startCrossfade(false); // non-seekable live stream — also swaps _activeDeck
+      }
     } else {
       // Cold start — play immediately, no cache wait
       if (_crossfading && _fadingOutDeck) {
@@ -454,11 +597,16 @@ export async function loadAndPlay() {
         _teardownCrossfade(); _crossfading = false;
       }
       const deck = currentDeck;
-      _setDeckSrc(deck, getCachedUrl(cleanName, cleanArtist) || streamUrl);
+      _setDeckSrc(deck, getCachedUrl(cleanName, cleanArtist, item.id) || streamUrl);
       deck.play().catch(() => {});
       if (_activeGain()) {
-        _activeGain().gain.cancelScheduledValues(0);
-        _activeGain().gain.value = 1;
+        // Short 18ms ramp to full instead of an instant set — avoids a gain click on
+        // cold start (matches the outro micro-ramp pattern used elsewhere).
+        const g = _activeGain().gain;
+        const t0 = _ctx.currentTime;
+        g.cancelScheduledValues(t0);
+        g.setValueAtTime(g.value, t0);
+        g.linearRampToValueAtTime(1, t0 + 0.018);
       }
       // Fetch DJ data for current track (needed for crossfade timing)
       _outDjData = null;
@@ -469,6 +617,8 @@ export async function loadAndPlay() {
       prefetchCleanup(store.playerQueue, store.playerIndex);
     }
   }
+  // Deck swap (or cast POST) issued. The advance latch is released by the loadAndPlay
+  // wrapper's finally on every exit (success, early-return, throw) — see _loadAndPlayImpl.
   showPlayerBar();
   updatePlayPauseIcon(true);
   syncFullPlayer();
@@ -485,6 +635,14 @@ function _decodeEntities(s) {
   const el = document.createElement('textarea');
   el.innerHTML = s;
   return el.value;
+}
+
+// Stable identity key for a queue item — MUST match djmix.js _trackKey so the
+// predicted-next binding (C1) compares like-for-like across predict/commit.
+function _smartKey(item) {
+  return item.id != null
+    ? String(item.id)
+    : ((item.artist || '') + ':' + (item.name || '')).toLowerCase();
 }
 
 function resolveSource(item) {
@@ -564,6 +722,11 @@ export function hidePlayerBar() {
 let _lastNextTime = 0;
 export function nextTrack(opts = {}) {
   const reason = opts.reason || 'user';
+  // In-flight latch: block a concurrent advance while a previous one is still resolving
+  // its async loadAndPlay (deck swap not yet done). nextTrack→loadAndPlay is async and
+  // timeupdate/ended keep firing, so without this a second advance fires mid-flight →
+  // double advance / overlapping crossfades. Cleared inside loadAndPlay after the swap.
+  if (_advanceInFlight) return;
   // Throttle only rapid USER skips — never drop ended/auto/error advances (an auto
   // crossfade or ended event must always advance, or the track stalls/never transitions).
   const now = Date.now();
@@ -571,6 +734,7 @@ export function nextTrack(opts = {}) {
     if (now - _lastNextTime < 500) return;
     _lastNextTime = now;
   }
+  _advanceInFlight = true; // set synchronously before any async hop
 
   // ── Record skip/accept for recommendation feedback (only on user-initiated skips) ──
   if (reason === 'user' || reason === 'ended') {
@@ -596,13 +760,15 @@ export function nextTrack(opts = {}) {
   // If playing a virtual rec track, advance to next rec (both local and cast)
   import('./recommendations.js').then(m => {
     if (m.isPlayingRec()) {
+      // Rec advance does not go through loadAndPlay — release the latch here.
+      _advanceInFlight = false;
       m.playNextRec().then(filled => {
         if (!filled) { _activeDeckEl().pause(); updatePlayPauseIcon(false); }
       });
       return;
     }
     _nextTrackInQueue();
-  });
+  }).catch(() => { _advanceInFlight = false; });
 }
 
 function _nextTrackInQueue() {
@@ -622,9 +788,22 @@ function _nextTrackInQueue() {
       }
     }
     if (smartMode !== 'off' && _outDjData) {
-      const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
+      // Reuse the index _preAnalyzeUpcoming predicted+prefetched if it's still valid
+      // (in range, not already played, same track) — avoids re-running pickSmartNext at
+      // commit and picking a DIFFERENT track than the one we prefetched (non-gapless).
+      let smartIdx = null;
+      if (_predictedNextIdx != null
+          && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length
+          && _predictedNextIdx !== store.playerIndex) {
+        const cand = store.playerQueue[_predictedNextIdx];
+        if (cand && _smartKey(cand) === _predictedNextKey) smartIdx = _predictedNextIdx;
+      }
+      if (smartIdx == null) {
+        smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
+      }
+      _predictedNextIdx = null; _predictedNextKey = null; // consume the prediction
       if (smartIdx != null) {
-        markPlayed(store.playerIndex); // pickSmartNext is now side-effect-free; mark on real advance
+        markPlayed(store.playerQueue[store.playerIndex]); // pickSmartNext is side-effect-free; mark outgoing item on real advance
         store.playerIndex = smartIdx;
         loadAndPlay();
         return;
@@ -659,15 +838,20 @@ function _nextTrackInQueue() {
           showToast('No more similar tracks found');
           _activeDeckEl().pause();
           updatePlayPauseIcon(false);
+          _advanceInFlight = false; // terminal, no loadAndPlay — release latch
         }
       }).catch(() => {
         showToast('Failed to load more tracks');
         _activeDeckEl().pause();
         updatePlayPauseIcon(false);
+        _advanceInFlight = false; // terminal, no loadAndPlay — release latch
       }).finally(() => { store.radioLoading = false; });
+    } else {
+      _advanceInFlight = false; // no seed to fetch radio from — release latch
     }
   } else {
     // Queue ended — continue with virtual recommendations
+    _advanceInFlight = false; // rec advance does not go through loadAndPlay
     import('./recommendations.js').then(m => {
       m.playNextRec().then(filled => {
         if (!filled) {
@@ -711,7 +895,7 @@ export async function playRecTrack(item) {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
     const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
-    const cached = getCachedUrl(cleanName, cleanArtist);
+    const cached = getCachedUrl(cleanName, cleanArtist, item.id);
     const src = cached || streamUrl;
     const curDeck = _activeDeckEl();
     if (!curDeck.paused && curDeck.src && cached) {
@@ -956,20 +1140,23 @@ export function init() {
     deck.addEventListener('error', () => {
       if (!_isExpectedSrc(deck)) return; // ignore deferred errors from previous sources
       if (deck !== _activeDeckEl() && !_crossfading) return;
+      if (_advanceInFlight) return; // an advance is already resolving — don't double-fire
       if (_crossfading) {
-        // Error on incoming deck during crossfade — abort crossfade, skip track
+        // Error on incoming deck during crossfade — abort crossfade, skip track.
+        // Use _teardownCrossfade() so the tempo ramp (_cancelTempoRamp) is cancelled too;
+        // the old inline cleanup left the rAF tempo ramp writing playbackRate on the deck
+        // error-recovery reuses → tempo drift/glitch (the bug _teardownCrossfade prevents).
         if (_fadingOutDeck) {
           _fadingOutDeck.pause(); _fadingOutDeck.src = '';
           resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
           _fadingOutDeck = null;
         }
-        clearTimeout(_crossfadeTimer);
-        clearInterval(_rateReturnTimer);
-        if (_beatSync) { _beatSync.stop(); _beatSync = null; }
+        _teardownCrossfade();
         _crossfading = false;
       }
+      _advanceInFlight = true; // claim the advance synchronously before the deferred skip
       showToast('Stream error, skipping...');
-      setTimeout(() => nextTrack({ reason: 'error' }), 1000);
+      setTimeout(() => { _advanceInFlight = false; nextTrack({ reason: 'error' }); }, 1000);
     });
   });
 
@@ -997,10 +1184,10 @@ export function init() {
         const nextItem = store.playerQueue[store.playerIndex + 1];
         // Now: is current track from cache (blob) or streaming?
         const nowCached = deck.src && deck.src.startsWith('blob:');
-        const nowSt = curItem ? getPrefetchStatus(_decodeEntities(curItem.name || ''), _decodeEntities(curItem.artist || '')) : null;
+        const nowSt = curItem ? getPrefetchStatus(_decodeEntities(curItem.name || ''), _decodeEntities(curItem.artist || ''), curItem.id) : null;
         const nowReady = nowCached || (nowSt && nowSt.state === 'ready');
         // Next: prefetch progress
-        const nextSt = nextItem ? getPrefetchStatus(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || '')) : null;
+        const nextSt = nextItem ? getPrefetchStatus(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || ''), nextItem.id) : null;
         const nextPct = nextSt ? nextSt.progress : -1;
         let html = '';
         // Now dot
@@ -1045,7 +1232,7 @@ export function init() {
           if (triggerAt > dur * 0.25 || triggerAt > 30) triggerAt = _crossfadeDur();
         }
         if (remaining <= triggerAt && remaining > -5 && !_crossfadeTriggered
-            && store.repeatMode !== 'one' && !store.castDevice
+            && !_advanceInFlight && store.repeatMode !== 'one' && !store.castDevice
             && deck.currentTime > 10) { // don't trigger in first 10s
           const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all';
           if (hasNext) {
@@ -1072,10 +1259,12 @@ export function init() {
       const deck = _activeDeckEl();
       if (deck.paused) {
         deck.play().catch(() => {});
+      } else if (_crossfading) {
+        // Finalize the fade to a clean single deck, then pause it (avoids timers/ramps
+        // running in wall-clock while paused → wrong gain/rate on resume).
+        _finalizeCrossfadeOnPause().pause();
       } else {
         deck.pause();
-        // Also pause fading-out deck if crossfading
-        if (_fadingOutDeck && !_fadingOutDeck.paused) _fadingOutDeck.pause();
       }
     }
   });
@@ -1226,9 +1415,10 @@ export function init() {
           const deck = _activeDeckEl();
           if (deck.paused) {
             deck.play().catch(() => {});
+          } else if (_crossfading) {
+            _finalizeCrossfadeOnPause().pause();
           } else {
             deck.pause();
-            if (_fadingOutDeck && !_fadingOutDeck.paused) _fadingOutDeck.pause();
           }
         }
         break;
