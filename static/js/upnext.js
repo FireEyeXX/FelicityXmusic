@@ -6,6 +6,7 @@ import { store } from './store.js';
 import { apiJson } from './api.js';
 import { showToast } from './utils.js';
 import { getPlayerModule } from './player_active.js';
+import { clearAll as clearPrefetch } from './prefetch.js';
 
 const UPNEXT_DISPLAY = 'Up Next';
 const RADIO_DISPLAY = 'Radio';
@@ -142,6 +143,7 @@ export function mirrorAdd(tracks) {
 export async function clearActiveQueue() {
   store.playerQueue = [];
   store.playerIndex = -1;
+  clearPrefetch(); // revoke cached blob URLs so they don't leak when the queue is emptied
   if (isUpNextActive() && activePlaylistId()) {
     replaceByName(activePlaylistId(), []).catch(() => {});
   } else {

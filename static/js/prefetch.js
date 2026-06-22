@@ -20,6 +20,17 @@ export function abortPrefetch() {
     _fetching.delete(key);
   }
 }
+/** Abort in-flight fetches, drop the pending queue, and revoke EVERY cached blob.
+ *  Call when the active queue is cleared/replaced so blob URLs don't leak.
+ *  Precondition: callers must pause active playback first — this revokes the
+ *  currently-playing blob too (all current callers pause before clearActiveQueue). */
+export function clearAll() {
+  for (const [, state] of _fetching) { try { state.controller.abort(); } catch (e) {} }
+  _fetching.clear();
+  _queue.length = 0;
+  for (const [, entry] of _cache) URL.revokeObjectURL(entry.blobUrl);
+  _cache.clear();
+}
 export function resumePrefetch() {
   _paused = false;
   // Rebuild queue from current position (clear stale entries)
@@ -129,10 +140,10 @@ async function _startFetch(entry) {
     const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: store.authToken });
     const res = await apiFetch(`/api/player/stream?${params}`, { signal: controller.signal });
     if (!res.ok) { _fetching.delete(entry.key); _processNext(); return; }
-    // Validate content-type is audio — reject error pages served with 200 status
+    // Validate content-type — reject HTML/JSON error pages served with 200 status.
+    // Accept audio/* and application/octet-stream (some flac/mp3 streams use it).
     const ct = (res.headers.get('content-type') || '').toLowerCase();
-    if (ct && !ct.startsWith('audio/') && !ct.startsWith('application/octet-stream')
-        && !ct.startsWith('video/')) {
+    if (ct && !ct.startsWith('audio/') && !ct.startsWith('application/octet-stream')) {
       _fetching.delete(entry.key); _processNext(); return;
     }
 
@@ -154,6 +165,9 @@ async function _startFetch(entry) {
     } else {
       blob = await res.blob();
     }
+    // Reject suspiciously small bodies — an error page/JSON served as octet-stream
+    // with HTTP 200 would otherwise poison the cache for the full 4h stream TTL.
+    if (blob.size < 10240) { _fetching.delete(entry.key); _processNext(); return; }
     _cache.set(entry.key, { blobUrl: URL.createObjectURL(blob) });
     state.progress = 100;
   } catch (e) {

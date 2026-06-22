@@ -73,7 +73,7 @@ export function renderQueueInto(el) {
     <div class="queue-item${i === store.playerIndex ? ' now-playing' : ''}" data-qi="${i}" draggable="true">
       <span class="qi-drag" title="Drag to reorder">&#x2630;</span>
       <span class="qi-num">${i === store.playerIndex ? '&#9654;' : i + 1}</span>
-      <img class="qi-img" src="${item.image || ''}" alt="" onerror="this.style.background='var(--bg-elevated)'">
+      <img class="qi-img" src="${esc(item.image || '')}" alt="" onerror="this.style.background='var(--bg-elevated)'">
       <div class="qi-info">
         <div class="qi-title">${esc(item.name || '')}</div>
         <div class="qi-artist">${esc(item.artist || '')}</div>
@@ -111,7 +111,13 @@ export function renderQueueInto(el) {
       if (idx < store.playerIndex) store.playerIndex--;
       else if (idx === store.playerIndex) {
         if (store.playerIndex >= store.playerQueue.length) store.playerIndex = store.playerQueue.length - 1;
-        if (store.playerIndex >= 0) loadAndPlay();
+        if (store.playerIndex >= 0) {
+          // Hard cut: pause the active deck so the engine does NOT crossfade out of
+          // the track the user just removed (crossfade/dj loadAndPlay crossfades
+          // whenever the active deck is still playing).
+          try { const a = audio(); if (a) a.pause(); } catch (e) {}
+          loadAndPlay();
+        }
         else { audio().pause(); hidePlayerBar(); }
       }
       renderQueue();
@@ -180,16 +186,19 @@ export function closeQueuePanel(fromPopstate) {
 
 // ── Drag & Drop Reorder ──
 let _dragIdx = -1;
+let _dragContainer = null; // the queue list a drag started in (queue renders into up to 3)
 function _attachDragHandlers(el) {
   $$('.queue-item', el).forEach(qi => {
     qi.addEventListener('dragstart', (e) => {
       _dragIdx = parseInt(qi.dataset.qi);
+      _dragContainer = el;
       qi.classList.add('qi-dragging');
       e.dataTransfer.effectAllowed = 'move';
     });
     qi.addEventListener('dragend', () => {
       qi.classList.remove('qi-dragging');
       _dragIdx = -1;
+      _dragContainer = null;
     });
     qi.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -207,9 +216,15 @@ function _attachDragHandlers(el) {
       e.preventDefault();
       qi.classList.remove('qi-drag-over');
       const toIdx = parseInt(qi.dataset.qi);
-      if (_dragIdx < 0 || _dragIdx === toIdx) return;
-      _moveQueueItem(_dragIdx, toIdx);
+      // Only honor a drop in the SAME container the drag started in, and only if
+      // both indices are still valid (the queue may have re-rendered mid-drag).
+      const n = store.playerQueue.length;
+      if (_dragContainer === el && _dragIdx >= 0 && _dragIdx < n
+          && toIdx >= 0 && toIdx < n && _dragIdx !== toIdx) {
+        _moveQueueItem(_dragIdx, toIdx);
+      }
       _dragIdx = -1;
+      _dragContainer = null;
     });
   });
 }

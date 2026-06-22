@@ -405,7 +405,12 @@ function _removeFromQueue(idx) {
   if (idx < store.playerIndex) store.playerIndex--;
   else if (idx === store.playerIndex) {
     if (store.playerIndex >= store.playerQueue.length) store.playerIndex = store.playerQueue.length - 1;
-    if (store.playerIndex >= 0) getPlayerModule().then(m => m.loadAndPlay && m.loadAndPlay());
+    if (store.playerIndex >= 0) getPlayerModule().then(m => {
+      // Hard cut: pause the active deck so crossfade/dj engines don't crossfade
+      // out of the track that was just removed.
+      try { const a = m.getAudio && m.getAudio(); if (a) a.pause(); } catch (e) {}
+      m.loadAndPlay && m.loadAndPlay();
+    });
   }
   import('./queue.js').then(m => m.renderQueue());
   getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());

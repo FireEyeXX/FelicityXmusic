@@ -418,6 +418,13 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     _playedIndices.add(currentIndex);
     return pickSmartNext(queue, currentIndex, currentDjData, mode, repeatAll);
   }
+  // Fallback: no BPM/key match found, but unplayed tracks remain (e.g. not yet
+  // analyzed) — advance sequentially instead of silently ending the queue.
+  if (bestIdx == null) {
+    for (let i = currentIndex + 1; i < queue.length; i++) {
+      if (!_playedIndices.has(i)) { bestIdx = i; break; }
+    }
+  }
   return bestIdx;
 }
 
