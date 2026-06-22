@@ -21,7 +21,12 @@ BPM_CACHE_FILE = DATA_DIR / "bpm_analysis.json"
 
 ZOUK_MIN_BPM = 60       # fold window spans exactly one octave (60–120 = 2×) → no dead zone
 ZOUK_MAX_BPM = 120
-BPM_ALGO_VERSION = 2    # bump to invalidate cached/tagged BPM when the algorithm changes
+BPM_ALGO_VERSION = 3    # bump to invalidate cached/tagged BPM when the algorithm changes
+
+# Dance-band fold center: zouk is danced ~82 BPM (half-time). Env-overridable.
+_DANCE_CENTER = float(os.environ.get("BPM_DANCE_CENTER", "82"))
+# Number of evenly-spaced analysis windows across the track body.
+_BPM_SEGMENTS = int(os.environ.get("BPM_SEGMENTS", "3"))
 
 CAMELOT_MAP = {
     "A minor": "8A", "E minor": "9A", "B minor": "10A", "F# minor": "11A",
@@ -37,7 +42,7 @@ _bpm_cache: dict = {}
 # 4 threads — C extensions (librosa/numpy FFT, essentia C++, madmom Cython)
 # release the GIL, so threads give real parallelism with shared memory.
 # 4 threads ≈ 1.5 GB total vs 16 subprocesses ≈ 10 GB.
-_executor = ThreadPoolExecutor(max_workers=2)
+_executor = ThreadPoolExecutor(max_workers=int(os.environ.get("BPM_WORKERS", "2")))
 
 
 def _load_cache() -> dict:
@@ -66,45 +71,53 @@ def _cache_key(name: str, artist: str) -> str:
 
 
 def normalize_bpm(bpm: float, min_bpm: float = ZOUK_MIN_BPM, max_bpm: float = ZOUK_MAX_BPM) -> float:
-    """Fold a detected tempo into one clean octave [min, max) — a true 2× range, so there
-    is no dead zone where values pass through unfolded. Makes slow and fast zouk tracks
-    land on comparable, sortable BPM values (fixes 'slow song reads higher than fast')."""
+    """Dance-aware octave fold. Brings a detected tempo into a sane octave window, then
+    folds into ONE clean octave centered (geometrically) on the zouk dance center — a
+    STRICT MONOTONE fold (no dead zone, no per-value octave flips) so tracks stay
+    comparable/sortable. The band follows BPM_DANCE_CENTER: everything lands in
+    [center/√2, center·√2). Lower the center to shift the whole scale toward the
+    half-time pulse zouk is danced to. Keeps the original name+signature."""
     if bpm <= 0:
         return bpm
-    while bpm >= max_bpm: bpm /= 2
-    while bpm < min_bpm: bpm *= 2
-    return bpm
+    lo = _DANCE_CENTER / 1.4142135623730951  # center / √2
+    hi = lo * 2.0
+    while bpm >= hi: bpm /= 2
+    while bpm < lo: bpm *= 2
+    return round(bpm, 2)
 
 
 # ── Analysis (runs in thread, C extensions release GIL) ──
 
-def analyze_bpm(file_path: str) -> dict:
-    """Ensemble BPM analysis — loads audio ONCE, skips madmom if others agree."""
+def _read_window(file_path: str, start_sec: float, len_sec: float):
+    """Read ONLY one window of audio (never the whole track), resampled to 44100Hz.
+    Returns (mono_44k, data_44k) where data_44k preserves channels."""
     import soundfile as sf
     import librosa
-
-    # Load once at 44100Hz
-    data_44k, sr = sf.read(file_path, dtype="float32")
+    info = sf.info(file_path)
+    sr = info.samplerate
+    data, _ = sf.read(file_path, start=int(start_sec * sr),
+                      frames=int(len_sec * sr), dtype="float32")
     if sr != 44100:
-        data_44k = librosa.resample(data_44k.T, orig_sr=sr, target_sr=44100).T
-    if data_44k.ndim > 1:
-        mono_44k = np.mean(data_44k, axis=1)
+        if data.ndim > 1:
+            data = librosa.resample(data.T, orig_sr=sr, target_sr=44100).T
+        else:
+            data = librosa.resample(data, orig_sr=sr, target_sr=44100)
+    if data.ndim > 1:
+        mono = np.mean(data, axis=1)
     else:
-        mono_44k = data_44k
+        mono = data
+    return mono, data
 
-    # Skip first 30s (intro), analyze 60s of the body
-    start = min(30 * 44100, len(mono_44k) // 3)
-    end = start + 60 * 44100
-    mono_44k_seg = mono_44k[start:end]
-    data_44k_seg = data_44k[start:end] if data_44k.ndim > 1 else mono_44k_seg
 
-    # Downsample for librosa
-    mono_22k = librosa.resample(mono_44k_seg, orig_sr=44100, target_sr=22050)
-
+def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
+    """Run the librosa + essentia detectors on a single window.
+    Returns (raw_values_dict, beat_positions_rel, detected_key_or_None)."""
+    import librosa
     raw = {}
 
-    # ── 1. librosa (hop_length=512 → 2× faster, minimal accuracy loss) ──
+    # ── librosa (hop_length=512 → 2× faster, minimal accuracy loss) ──
     HOP = 512
+    mono_22k = librosa.resample(mono_44k_seg, orig_sr=44100, target_sr=22050)
     _, y_perc = librosa.effects.hpss(mono_22k, margin=3.0)
     onset_env = librosa.onset.onset_strength(
         y=y_perc, sr=22050, hop_length=HOP,
@@ -121,12 +134,10 @@ def analyze_bpm(file_path: str) -> dict:
     )
     bt = librosa.frames_to_time(beat_frames, sr=22050, hop_length=HOP)
     raw["librosa_beats"] = round(float(60.0 / np.median(np.diff(bt))), 1) if len(bt) > 1 else raw["librosa_tempo"]
-    # Store beat positions (offset by segment start for absolute track time)
-    seg_offset = start / 44100
-    beat_positions = [round(float(t) + seg_offset, 3) for t in bt]
-    del y_perc, onset_env, bt
+    beat_positions_rel = [round(float(t), 3) for t in bt]
+    del y_perc, onset_env, bt, mono_22k
 
-    # ── 2. essentia (hopSize=256 → 2× faster) ──
+    # ── essentia (hopSize=256 → 2× faster) ──
     detected_key = None
     try:
         import essentia.standard as es
@@ -138,89 +149,148 @@ def analyze_bpm(file_path: str) -> dict:
             method="multifeature", maxTempo=120, minTempo=55,
         )(audio_es)
         raw["essentia_rhythm"] = round(float(rbpm), 1)
-        # Key detection
-        try:
-            key_name, scale, strength = es.KeyExtractor()(audio_es)
-            detected_key = f"{key_name} {scale}"
-        except Exception as e:
-            logger.warning("Key detection failed: %s", e)
-            detected_key = None
+        if want_key:
+            try:
+                key_name, scale, strength = es.KeyExtractor()(audio_es)
+                detected_key = f"{key_name} {scale}"
+            except Exception as e:
+                logger.warning("Key detection failed: %s", e)
+                detected_key = None
         del audio_es
     except ImportError:
         detected_key = None
 
-    # ── 3. madmom (RNN) — SKIP if essentia+librosa agree ±2 BPM ──
-    run_madmom = True
-    if "essentia_percival" in raw:
-        n_lib = normalize_bpm(raw["librosa_tempo"])
-        n_perc = normalize_bpm(raw["essentia_percival"])
-        n_rhy = normalize_bpm(raw["essentia_rhythm"])
-        if abs(n_lib - n_perc) <= 2 and abs(n_lib - n_rhy) <= 2:
-            run_madmom = False
+    return raw, beat_positions_rel, detected_key
 
-    if run_madmom:
-        try:
-            import madmom
-            from madmom.audio.signal import Signal
-            if data_44k_seg.ndim == 1:
-                mm_data = data_44k_seg.reshape(-1, 1)
-            else:
-                mm_data = data_44k_seg
-            signal = Signal(mm_data.astype(np.float32), sample_rate=44100)
-            activation = madmom.features.beats.RNNBeatProcessor(
-                num_threads=3,
-            )(signal)
-            beats = madmom.features.beats.DBNBeatTrackingProcessor(
-                min_bpm=55, max_bpm=120, fps=100, transition_lambda=200,
-            )(activation)
-            if len(beats) >= 2:
-                raw["madmom_rnn"] = round(float(60.0 / np.median(np.diff(beats))), 1)
-            del signal, activation, beats
-        except ImportError:
-            pass
 
-    # Track duration for beat grid (before freeing buffers)
-    track_duration = len(mono_44k) / 44100
+def analyze_bpm(file_path: str) -> dict:
+    """Multi-segment ensemble BPM analysis — memory efficient (windowed reads only,
+    never loads the whole track), with two-level cross-segment confidence
+    (within-window detector agreement + cross-segment agreement)."""
+    import soundfile as sf
 
-    # ── Intro/outro beat detection (first 30s + last 60s only, memory efficient) ──
-    forced_bpm = raw.get("librosa_tempo", 85)
-    sr22 = 22050
-    # Intro: first 30s
-    intro_len = min(30 * 44100, len(mono_44k))
-    intro_22k = librosa.resample(mono_44k[:intro_len], orig_sr=44100, target_sr=sr22)
-    _, intro_frames = librosa.beat.beat_track(y=intro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
-    intro_beats = librosa.frames_to_time(intro_frames, sr=sr22, hop_length=HOP).tolist()
-    del intro_22k
-    # Outro: last 60s
-    outro_offset = max(0, len(mono_44k) - 60 * 44100)
-    outro_22k = librosa.resample(mono_44k[outro_offset:], orig_sr=44100, target_sr=sr22)
-    _, outro_frames = librosa.beat.beat_track(y=outro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
-    outro_beats = [round(t + outro_offset / 44100, 3) for t in librosa.frames_to_time(outro_frames, sr=sr22, hop_length=HOP).tolist()]
-    del outro_22k
-    # Combine for full_beats (intro + outro, deduplicated)
-    full_beats = sorted(set(intro_beats + outro_beats))
+    info = sf.info(file_path)
+    track_duration = float(info.duration)
 
-    # Free audio buffers
-    del data_44k, mono_44k, mono_44k_seg, data_44k_seg, mono_22k
+    # ── Plan windows: N windows of 45s evenly spaced across 10%–85% of the body.
+    WIN_LEN = 45.0
+    if track_duration < 90:
+        starts = [0.0]  # very short track: single window at start
+    else:
+        body_start = 0.10 * track_duration
+        body_end = 0.85 * track_duration
+        n = max(1, _BPM_SEGMENTS)
+        if n == 1:
+            starts = [body_start]
+        else:
+            span = body_end - body_start
+            step = span / (n - 1)
+            starts = [body_start + i * step for i in range(n)]
+        # Clamp so each window fits inside the track.
+        max_start = max(0.0, track_duration - WIN_LEN)
+        starts = [min(s, max_start) for s in starts]
+        # Drop near-duplicate windows (short tracks clamp several starts together).
+        dedup = []
+        for s in starts:
+            if not any(abs(s - d) < WIN_LEN / 2 for d in dedup):
+                dedup.append(s)
+        starts = dedup
 
-    # ── Normalize + weighted median ──
-    normalized = {k: round(normalize_bpm(v), 1) for k, v in raw.items()}
     weights = {
-        "madmom_rnn": 4.0, "essentia_percival": 3.0, "essentia_rhythm": 2.0,
+        "essentia_percival": 3.0, "essentia_rhythm": 2.0,
         "librosa_tempo": 1.5, "librosa_beats": 1.0,
     }
-    pairs = sorted([(normalized[k], weights.get(k, 1.0)) for k in normalized], key=lambda x: x[0])
-    cumw = np.cumsum([w for _, w in pairs])
-    idx = int(np.searchsorted(cumw, cumw[-1] / 2))
-    final_bpm = pairs[idx][0]
 
-    values = list(normalized.values())
-    std = float(np.std(values)) if len(values) > 1 else 0.0
-    confidence = 0.95 if std < 1 else 0.85 if std < 2 else 0.70 if std < 4 else 0.50 if std < 8 else 0.30
+    mid_idx = len(starts) // 2
+    raw = {}
+    detected_key = None
+    beat_positions = []           # absolute beat times from the first window
+    per_window_folded = []        # list of dicts {detector: folded_bpm}
+    within_stds = []              # std of folded detector values within each window
+
+    for wi, s in enumerate(starts):
+        try:
+            mono_seg, data_seg = _read_window(file_path, s, WIN_LEN)
+            if len(mono_seg) == 0:
+                del mono_seg, data_seg
+                continue
+            want_key = (wi == mid_idx)
+            win_raw, bt_rel, win_key = _detect_window(mono_seg, data_seg, want_key)
+            del mono_seg, data_seg
+        except Exception as e:
+            # One bad window must not abort the whole analysis (we run N of them).
+            logger.warning("BPM window %d failed: %s", wi, e)
+            continue
+        if want_key and win_key:
+            detected_key = win_key
+        # First window's beats become the absolute beat_positions / anchor source.
+        if wi == 0:
+            beat_positions = [round(t + s, 3) for t in bt_rel]
+        # Merge raw values with window-index suffix for debugging.
+        for k, v in win_raw.items():
+            raw[f"{k}_{wi}"] = v
+        # Fold this window's detector values.
+        folded = {k: round(normalize_bpm(v), 2) for k, v in win_raw.items()}
+        per_window_folded.append(folded)
+        fvals = list(folded.values())
+        within_stds.append(float(np.std(fvals)) if len(fvals) > 1 else 0.0)
+
+    # ── Beat detection for intro/outro (windowed, never whole track) ──
+    import librosa
+    HOP = 512
+    sr22 = 22050
+    forced_bpm = raw.get("librosa_tempo_0", 85)
+    # Intro: first 30s
+    intro_len = min(30.0, track_duration)
+    intro_mono, _ = _read_window(file_path, 0.0, intro_len)
+    intro_22k = librosa.resample(intro_mono, orig_sr=44100, target_sr=sr22)
+    _, intro_frames = librosa.beat.beat_track(y=intro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
+    intro_beats = librosa.frames_to_time(intro_frames, sr=sr22, hop_length=HOP).tolist()
+    del intro_22k, intro_mono
+    # Outro: last 60s
+    outro_offset = max(0.0, track_duration - 60.0)
+    outro_mono, _ = _read_window(file_path, outro_offset, track_duration - outro_offset)
+    outro_22k = librosa.resample(outro_mono, orig_sr=44100, target_sr=sr22)
+    _, outro_frames = librosa.beat.beat_track(y=outro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
+    outro_beats = [round(t + outro_offset, 3) for t in librosa.frames_to_time(outro_frames, sr=sr22, hop_length=HOP).tolist()]
+    del outro_22k, outro_mono
+    full_beats = sorted(set(intro_beats + outro_beats))
+
+    # ── Weighted median over ALL (window × detector) folded values ──
+    all_pairs = []
+    for folded in per_window_folded:
+        for k, v in folded.items():
+            all_pairs.append((v, weights.get(k, 1.0)))
+    all_pairs.sort(key=lambda x: x[0])
+    if all_pairs:
+        cumw = np.cumsum([w for _, w in all_pairs])
+        idx = int(np.searchsorted(cumw, cumw[-1] / 2))
+        final_bpm = all_pairs[idx][0]
+    else:
+        final_bpm = round(normalize_bpm(forced_bpm), 2)
+    if not final_bpm or final_bpm <= 0:
+        final_bpm = round(normalize_bpm(85), 2)  # floor — never let beat_period divide by 0
+
+    # ── Two-level confidence: within-window agreement × segment agreement ──
+    within_std_max = max(within_stds) if within_stds else 0.0
+    seg_medians = [float(np.median(list(f.values()))) for f in per_window_folded if f]
+    segment_std = float(np.std(seg_medians)) if len(seg_medians) > 1 else 0.0
+    spread = max(within_std_max, segment_std)
+    confidence = 0.95 if spread < 1 else 0.85 if spread < 2 else 0.70 if spread < 4 else 0.50 if spread < 8 else 0.30
+
+    # (Downbeat tie-break intentionally omitted: with single-octave band folding every
+    # value already collapses into the same octave, so a downbeat estimate cannot
+    # disambiguate the metrical level — the cross-segment confidence above is the
+    # uncertainty signal instead, and it flags tracks where segments genuinely disagree.)
+
+    # Merge per-window folded values into one normalized dict (suffixed keys).
+    normalized = {}
+    for wi, folded in enumerate(per_window_folded):
+        for k, v in folded.items():
+            normalized[f"{k}_{wi}"] = v
 
     # ── Beat grid (quantized from final BPM, full track) ──
     beat_period = 60.0 / final_bpm
-    # Use first full-track beat as anchor (not segment offset)
     anchor = full_beats[0] if full_beats else 0
     beat_grid = [round(anchor + i * beat_period, 3)
                  for i in range(int((track_duration - anchor) / beat_period) + 1)]
@@ -235,7 +305,6 @@ def analyze_bpm(file_path: str) -> dict:
             gap = full_beats[i] - full_beats[i - 1]
             if gap > beat_period * 1.5:
                 candidate = round(full_beats[i - 1], 3)
-                # Sanity: outro must be in the last half of the track
                 if candidate > track_duration * 0.5:
                     outro_start = candidate
                 break
@@ -462,7 +531,7 @@ def _analyze_or_read_tag(file_path: str) -> dict:
     # Need full analysis (missing tag(s))
     result = analyze_bpm(file_path)
     # Write all tags
-    anchor = result.get("beat_positions", [None])[0]
+    anchor = (result.get("beat_positions") or [None])[0]
     write_tags(file_path,
                bpm=int(round(result["bpm"])),
                key=result.get("key"),
