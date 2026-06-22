@@ -3,7 +3,6 @@
 import { store } from './store.js';
 import { $, showToast } from './utils.js';
 import { apiJson } from './api.js';
-import { loadAndPlay } from './player.js';
 import { toggleFavoriteArtist } from './favorites.js';
 import { playRadio } from './upnext.js';
 

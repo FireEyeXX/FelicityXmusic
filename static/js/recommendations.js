@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { $, $$, esc, showToast, showPlaylistPicker } from './utils.js';
 import { apiJson } from './api.js';
 import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { getPlayerModule } from './player_active.js';
 
 let recsCache = [];
 let recsLoading = false;
@@ -74,7 +75,7 @@ export async function playNextRec() {
   if (!track) { recsPlayingIdx = -1; return false; }
 
   // Play directly via player without adding to queue
-  import('./player.js').then(m => m.playRecTrack(track));
+  getPlayerModule().then(m => m.playRecTrack(track));
   renderRecs();
   return true;
 }
@@ -90,7 +91,7 @@ export function playPrevRec() {
   recsPlayingIdx--;
   const track = recsCache[recsPlayingIdx];
   if (!track) { recsPlayingIdx = -1; renderRecs(); return false; }
-  import('./player.js').then(m => m.playRecTrack(track));
+  getPlayerModule().then(m => m.playRecTrack(track));
   renderRecs();
   return true;
 }
@@ -181,7 +182,7 @@ export function playRecIndex(idx) {
   const track = recsCache[idx];
   if (!track) return;
   recsPlayingIdx = idx;
-  import('./player.js').then(m => m.playRecTrack(track));
+  getPlayerModule().then(m => m.playRecTrack(track));
   import('./queue.js').then(m => {
     if (store.queuePanelOpen && m.closeQueuePanel) m.closeQueuePanel();
     if (store.fpQueuePanelOpen && m.closeFpQueuePanel) m.closeFpQueuePanel();
@@ -206,7 +207,7 @@ function _attachRecsHandlers(el) {
       const track = recsCache[idx];
       if (!track) return;
       recsPlayingIdx = idx;
-      import('./player.js').then(m => m.playRecTrack(track));
+      getPlayerModule().then(m => m.playRecTrack(track));
       // Close any open queue panel so player controls are accessible
       // (queue-panel sits above the player bar via z-index)
       import('./queue.js').then(m => {
@@ -222,7 +223,7 @@ function _attachRecsHandlers(el) {
       e.stopPropagation();
       const track = recsCache[btn.dataset.recIdx];
       if (!track) return;
-      import('./player.js').then(m => m.addToQueue([track]));
+      getPlayerModule().then(m => m.addToQueue([track]));
     });
   });
   // Playlist icon = add to Navidrome playlist

@@ -3,6 +3,7 @@
 import { store } from './store.js';
 import { $, $$, esc, showToast, historyBack } from './utils.js';
 import { apiFetch, apiJson } from './api.js';
+import { getPlayerModule } from './player_active.js';
 
 // ── Download Modal ──
 export function openModal(item) {
@@ -274,7 +275,7 @@ export function init() {
     if (!store.modalItem) return;
     const item = { ...store.modalItem };
     closeModal();
-    const { resolveItemTracks } = await import('./player.js');
+    const { resolveItemTracks } = await getPlayerModule();
     const tracks = await resolveItemTracks(item);
     if (tracks.length) {
       const u = await import('./upnext.js');
@@ -285,7 +286,7 @@ export function init() {
     if (!store.modalItem) return;
     const item = { ...store.modalItem };
     closeModal();
-    const { resolveItemTracks, addToQueue } = await import('./player.js');
+    const { resolveItemTracks, addToQueue } = await getPlayerModule();
     const tracks = await resolveItemTracks(item);
     if (tracks.length) addToQueue(tracks);
   });

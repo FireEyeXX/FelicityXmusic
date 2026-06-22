@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { $, $$, esc, historyBack, showToast } from './utils.js';
 import { getCachedBpm } from './bpm.js';
 import { attachContextMenu, wasLongPress } from './contextmenu.js';
+import { getPlayerModule } from './player_active.js';
 
 // Forward references set during init to avoid circular imports
 let loadAndPlay, hidePlayerBar, saveQueueDebounced;
@@ -312,7 +313,7 @@ export function init() {
         showToast(`Saved "${name.trim()}" (${added}/${store.playerQueue.length} tracks)`);
         store.playlistMode = { id: pl.id, name: name.trim() };
       }
-      import('./player.js').then(m => m.updatePlaylistBadge());
+      getPlayerModule().then(m => m.updatePlaylistBadge());
       const badge = $('#fpPlaylistBadge');
       if (badge && store.playlistMode) { badge.textContent = store.playlistMode.name; badge.style.display = ''; }
       updateSaveButton();

@@ -6,6 +6,7 @@ import { apiJson } from './api.js';
 import { renderResults } from './search.js';
 import { fetchPlaylistBpm, addBpmBadges, createBpmFilter, addScanButton } from './bpm.js';
 import { attachContextMenu, buildActionsFor, showContextMenu, wasLongPress } from './contextmenu.js';
+import { getPlayerModule } from './player_active.js';
 
 let libraryCache = null;
 let currentLibPlaylistId = null;
@@ -84,7 +85,7 @@ async function _playLibraryPlaylist(pl, playNow) {
     const tracks = await _fetchPlaylistTracks(pl.id);
     if (!tracks.length) { showToast('Empty playlist'); return; }
     store.playlistMode = { id: pl.id, name: pl.name };
-    const m = await import('./player.js');
+    const m = await getPlayerModule();
     if (playNow) {
       // Mode is named playlist — playTracks will not mirror (guarded by isUpNextActive)
       const u = await import('./upnext.js');
@@ -331,14 +332,14 @@ function _buildMultiSelectMenu(playlistId, playlistName) {
           const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
           store.playerQueue.splice(idx, 0, ...selectedItems);
           import('./queue.js').then(m => m.renderQueue());
-          import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+          getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
           showToast(`${count} tracks will play next`);
         },
       },
       {
         label: 'Add to playlist', icon: '+',
         onClick: () => {
-          import('./player.js').then(m => {
+          getPlayerModule().then(m => {
             m.addToQueue(selectedItems);
             showToast(`Added ${count} to playlist`);
           });
@@ -523,7 +524,7 @@ export function init() {
     const tracks = getLibTracksForPlayer();
     if (tracks.length) {
       store.playlistMode = currentLibPlaylistId ? { id: currentLibPlaylistId, name: currentLibPlaylistName } : null;
-      import('./player.js').then(m => m.addToQueue(tracks));
+      getPlayerModule().then(m => m.addToQueue(tracks));
     }
   });
 

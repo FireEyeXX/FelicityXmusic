@@ -5,6 +5,7 @@
 import { store } from './store.js';
 import { apiJson } from './api.js';
 import { showToast } from './utils.js';
+import { getPlayerModule } from './player_active.js';
 
 const UPNEXT_DISPLAY = 'Up Next';
 const RADIO_DISPLAY = 'Radio';
@@ -91,7 +92,7 @@ export async function playTracks(tracks) {
   if (!tracks || !tracks.length) return;
   store.playerQueue = tracks;
   store.playerIndex = 0;
-  const playerMod = await import('./player.js');
+  const playerMod = await getPlayerModule();
   playerMod.loadAndPlay();
   const id = activePlaylistId();
   if (id && isTempActive()) {
@@ -114,7 +115,7 @@ export async function playRadio(tracks) {
   } catch {}
   store.playerQueue = tracks;
   store.playerIndex = 0;
-  const playerMod = await import('./player.js');
+  const playerMod = await getPlayerModule();
   playerMod.loadAndPlay();
   const id = activePlaylistId();
   if (id && isRadioActive()) {

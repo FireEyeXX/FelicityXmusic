@@ -13,6 +13,7 @@ import { $, esc, showToast, showPlaylistPicker } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { store } from './store.js';
+import { getPlayerModule } from './player_active.js';
 
 const LONG_PRESS_MS = 480;
 const MOVE_THRESHOLD = 10; // px
@@ -360,14 +361,14 @@ export function buildActionsFor(item, type, context = {}) {
 
 // ── Action implementations ────────────────────────────────────────
 function _addToQueue(items) {
-  import('./player.js').then(m => {
+  getPlayerModule().then(m => {
     m.addToQueue(items);
     showToast(`Added ${items.length} to playlist`);
   });
 }
 
 function _playNow(item) {
-  import('./player.js').then(m => m.addToQueue([item], true));
+  getPlayerModule().then(m => m.addToQueue([item], true));
 }
 
 function _playNext(item) {
@@ -375,14 +376,14 @@ function _playNext(item) {
   const idx = (store.playerIndex >= 0 ? store.playerIndex : -1) + 1;
   store.playerQueue.splice(idx, 0, item);
   import('./queue.js').then(m => m.renderQueue());
-  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+  getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
   showToast('Will play next');
 }
 
 function _playQueueIndex(idx) {
   if (typeof idx !== 'number' || idx < 0 || idx >= store.playerQueue.length) return;
   store.playerIndex = idx;
-  import('./player.js').then(m => m.loadAndPlay && m.loadAndPlay());
+  getPlayerModule().then(m => m.loadAndPlay && m.loadAndPlay());
 }
 
 function _moveQueueAfterCurrent(idx) {
@@ -395,7 +396,7 @@ function _moveQueueAfterCurrent(idx) {
   }
   store.playerQueue.splice(dest, 0, item);
   import('./queue.js').then(m => m.renderQueue());
-  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+  getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
 }
 
 function _removeFromQueue(idx) {
@@ -404,10 +405,10 @@ function _removeFromQueue(idx) {
   if (idx < store.playerIndex) store.playerIndex--;
   else if (idx === store.playerIndex) {
     if (store.playerIndex >= store.playerQueue.length) store.playerIndex = store.playerQueue.length - 1;
-    if (store.playerIndex >= 0) import('./player.js').then(m => m.loadAndPlay && m.loadAndPlay());
+    if (store.playerIndex >= 0) getPlayerModule().then(m => m.loadAndPlay && m.loadAndPlay());
   }
   import('./queue.js').then(m => m.renderQueue());
-  import('./player.js').then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+  getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
 }
 
 async function _fetchAlbumTracks(album) {
