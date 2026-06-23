@@ -10,6 +10,24 @@ import { getPlayerModule } from './player_active.js';
 import { loadLikes, getLikedTracks, likedCount } from './likes.js';
 
 let libraryCache = null;
+
+// Format a total duration (seconds) coarsely: "1 h 23 min" / "42 min".
+function _fmtTotal(seconds) {
+  seconds = Math.round(seconds || 0);
+  if (seconds <= 0) return '';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+
+// Set the opened-playlist header: track count + total length (summed from the
+// live track list, each track carries duration_ms from the playlist endpoint).
+function _setLibDetailCount() {
+  const n = currentLibPlaylistTracks.length;
+  const totalSec = currentLibPlaylistTracks.reduce((a, t) => a + (t.duration_ms || 0), 0) / 1000;
+  const total = _fmtTotal(totalSec);
+  $('#libDetailCount').textContent = `${n} tracks` + (total ? ` · ${total}` : '');
+}
 let currentLibPlaylistId = null;
 let currentLibPlaylistName = '';
 let currentLibPlaylistTracks = [];
@@ -48,7 +66,7 @@ function renderLibraryGrid(playlists, grid) {
       ${pl.image ? `<img class="card-img" src="${pl.image}" alt="" loading="lazy">` : `<div class="card-img" style="background:linear-gradient(135deg,var(--accent),#1a1a2e);display:flex;align-items:center;justify-content:center;font-size:28px;color:var(--text);">&#9835;</div>`}
       <div class="card-body">
         <div class="card-title">${esc(pl.name)}</div>
-        <div class="card-sub">${pl.songCount} tracks</div>
+        <div class="card-sub">${pl.songCount} tracks${pl.duration ? ' · ' + _fmtTotal(pl.duration) : ''}</div>
       </div>
     </div>`).join('');
 
@@ -148,7 +166,7 @@ async function loadLibraryDetail(id) {
     } else {
       $('#libDetailImg').style.background = '';
     }
-    $('#libDetailCount').textContent = `${currentLibPlaylistTracks.length} tracks`;
+    _setLibDetailCount();
     renderResults(currentLibPlaylistTracks, '#libraryTracks');
     // Tracks from a Navidrome playlist are definitively in the library —
     // mark them so openModal shows the Delete button without waiting for checkLibrary.
@@ -492,7 +510,7 @@ function _addRemoveButtons(playlistId) {
         });
         card.remove();
         currentLibPlaylistTracks.splice(i, 1);
-        $('#libDetailCount').textContent = `${currentLibPlaylistTracks.length} tracks`;
+        _setLibDetailCount();
         showToast('Removed from playlist');
         // Re-index remaining buttons
         $$('#libraryTracks .lib-track-remove').forEach((b, j) => {
