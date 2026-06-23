@@ -14,7 +14,11 @@ async def get_track_bpm(
     """Get BPM for a single track. Analyzes if not cached."""
     if not force:
         cached = bpm.get_cached_bpm(name, artist)
-        if cached:
+        # Fast path only when the cached entry already has the current feature set.
+        # If energy/key_confidence are missing/stale, fall through to analyze_track, whose
+        # cache-hit branch runs the cheap _backfill_features WITHOUT recomputing BPM.
+        # Once backfilled, subsequent requests hit this fast path again.
+        if cached and cached.get("feature_version") == bpm.FEATURE_VERSION:
             return cached
 
     if not song_id:

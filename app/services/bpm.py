@@ -22,6 +22,25 @@ BPM_CACHE_FILE = DATA_DIR / "bpm_analysis.json"
 ZOUK_MIN_BPM = 60       # fold window spans exactly one octave (60–120 = 2×) → no dead zone
 ZOUK_MAX_BPM = 120
 BPM_ALGO_VERSION = 3    # bump to invalidate cached/tagged BPM when the algorithm changes
+FEATURE_VERSION = 1     # bump to lazily backfill audio features (energy/danceability/…) — NEVER triggers a BPM re-scan
+
+# ── Audio-feature normalization anchors (fixed references → reproducible 0..1, NOT dataset-relative) ──
+# All calibratable later; chosen to map typical music into a useful 0..1 spread.
+DBFS_FLOOR = -36        # RMS dBFS mapped to energy_loud=0
+DBFS_CEIL = -6          # RMS dBFS mapped to energy_loud=1
+BRIGHTNESS_REF_HZ = 4000  # spectral-centroid Hz mapped to brightness=1
+PULSE_REF = 4.0         # onset-strength magnitude mapped to danceability=1 (calibratable)
+
+
+def clamp01(x: float) -> float:
+    """Clamp a value into [0, 1] (NaN/None → 0.5 neutral)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0.5
+    if v != v:  # NaN
+        return 0.5
+    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
 
 # Dance-band fold center: zouk is danced ~82 BPM (half-time). Env-overridable.
 _DANCE_CENTER = float(os.environ.get("BPM_DANCE_CENTER", "82"))
@@ -88,6 +107,17 @@ def normalize_bpm(bpm: float, min_bpm: float = ZOUK_MIN_BPM, max_bpm: float = ZO
 
 # ── Analysis (runs in thread, C extensions release GIL) ──
 
+def _window_features(mono_44k_seg, onset_env, sr: int = 44100) -> dict:
+    """Per-window raw audio features computed on the ALREADY-loaded segment (no extra
+    file reads, no extra heavy DSP). `onset_env` is reused as-is (never recomputed).
+    Returns raw (un-normalized) values: {rms, centroid_hz, pulse}."""
+    import librosa
+    rms = float(np.mean(librosa.feature.rms(y=mono_44k_seg)))
+    centroid_hz = float(np.mean(librosa.feature.spectral_centroid(y=mono_44k_seg, sr=sr)))
+    pulse = float(np.mean(onset_env))
+    return {"rms": rms, "centroid_hz": centroid_hz, "pulse": pulse}
+
+
 def _read_window(file_path: str, start_sec: float, len_sec: float):
     """Read ONLY one window of audio (never the whole track), resampled to 44100Hz.
     Returns (mono_44k, data_44k) where data_44k preserves channels."""
@@ -111,9 +141,11 @@ def _read_window(file_path: str, start_sec: float, len_sec: float):
 
 def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
     """Run the librosa + essentia detectors on a single window.
-    Returns (raw_values_dict, beat_positions_rel, detected_key_or_None)."""
+    Returns (raw_values_dict, beat_positions_rel, detected_key_or_None, key_strength_or_None, features_dict)."""
     import librosa
     raw = {}
+    features = None
+    key_strength = None
 
     # ── librosa (hop_length=512 → 2× faster, minimal accuracy loss) ──
     HOP = 512
@@ -135,6 +167,13 @@ def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
     bt = librosa.frames_to_time(beat_frames, sr=22050, hop_length=HOP)
     raw["librosa_beats"] = round(float(60.0 / np.median(np.diff(bt))), 1) if len(bt) > 1 else raw["librosa_tempo"]
     beat_positions_rel = [round(float(t), 3) for t in bt]
+    # Per-window audio features — reuse the already-computed onset_env (additive, never
+    # allowed to break BPM detection).
+    try:
+        features = _window_features(mono_44k_seg, onset_env, sr=44100)
+    except Exception as e:
+        logger.warning("Feature extraction failed: %s", e)
+        features = None
     del y_perc, onset_env, bt, mono_22k
 
     # ── essentia (hopSize=256 → 2× faster) ──
@@ -153,6 +192,7 @@ def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
             try:
                 key_name, scale, strength = es.KeyExtractor()(audio_es)
                 detected_key = f"{key_name} {scale}"
+                key_strength = float(strength)
             except Exception as e:
                 logger.warning("Key detection failed: %s", e)
                 detected_key = None
@@ -160,7 +200,7 @@ def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
     except ImportError:
         detected_key = None
 
-    return raw, beat_positions_rel, detected_key
+    return raw, beat_positions_rel, detected_key, key_strength, features
 
 
 def analyze_bpm(file_path: str) -> dict:
@@ -204,9 +244,12 @@ def analyze_bpm(file_path: str) -> dict:
     mid_idx = len(starts) // 2
     raw = {}
     detected_key = None
+    key_strength = None           # essentia KeyExtractor confidence (mid window)
     beat_positions = []           # absolute beat times from the first window
     per_window_folded = []        # list of dicts {detector: folded_bpm}
     within_stds = []              # std of folded detector values within each window
+    per_window_features = []      # list of {rms, centroid_hz, pulse} raw feature dicts
+    per_window_keys = []          # detected key per window (for cross-window agreement fallback)
 
     for wi, s in enumerate(starts):
         try:
@@ -215,14 +258,19 @@ def analyze_bpm(file_path: str) -> dict:
                 del mono_seg, data_seg
                 continue
             want_key = (wi == mid_idx)
-            win_raw, bt_rel, win_key = _detect_window(mono_seg, data_seg, want_key)
+            win_raw, bt_rel, win_key, win_key_strength, win_features = _detect_window(mono_seg, data_seg, want_key)
             del mono_seg, data_seg
         except Exception as e:
             # One bad window must not abort the whole analysis (we run N of them).
             logger.warning("BPM window %d failed: %s", wi, e)
             continue
+        if win_features:
+            per_window_features.append(win_features)
+        if win_key:
+            per_window_keys.append(win_key)
         if want_key and win_key:
             detected_key = win_key
+            key_strength = win_key_strength
         # First window's beats become the absolute beat_positions / anchor source.
         if wi == 0:
             beat_positions = [round(t + s, 3) for t in bt_rel]
@@ -312,6 +360,11 @@ def analyze_bpm(file_path: str) -> dict:
     # ── Key / Camelot ──
     camelot = CAMELOT_MAP.get(detected_key) if detected_key else None
 
+    # ── Audio features (energy/danceability/brightness) + key confidence ──
+    # Reproducible, fixed-anchor normalization (NOT dataset-relative). Fully additive:
+    # any failure degrades to neutral 0.5 and never affects BPM/key/camelot/beat_grid.
+    features = _aggregate_features(per_window_features, key_strength, per_window_keys)
+
     return {
         "bpm": round(final_bpm, 1), "confidence": confidence,
         "raw": raw, "normalized": normalized,
@@ -322,7 +375,107 @@ def analyze_bpm(file_path: str) -> dict:
         "intro_end": intro_end,
         "outro_start": outro_start,
         "algo_version": BPM_ALGO_VERSION,
+        "energy": features["energy"],
+        "danceability": features["danceability"],
+        "brightness": features["brightness"],
+        "key_confidence": features["key_confidence"],
+        "feature_version": FEATURE_VERSION,
     }
+
+
+# ── Audio features: median-aggregate across windows + reproducible normalization ──
+
+def _aggregate_features(per_window_features: list, key_strength, per_window_keys: list) -> dict:
+    """Median-aggregate raw per-window features (mirrors the weighted-median BPM approach)
+    and map to reproducible 0..1 scalars via fixed anchors. Returns
+    {energy, danceability, brightness, key_confidence, feature_version}.
+
+    Fully additive: ANY failure degrades to neutral 0.5 and never touches BPM/key/camelot."""
+    try:
+        if per_window_features:
+            rms_raw = float(np.median([f["rms"] for f in per_window_features]))
+            centroid_hz = float(np.median([f["centroid_hz"] for f in per_window_features]))
+            pulse_raw = float(np.median([f["pulse"] for f in per_window_features]))
+
+            energy_loud = clamp01((20.0 * np.log10(rms_raw + 1e-6) - DBFS_FLOOR) / (DBFS_CEIL - DBFS_FLOOR))
+            danceability = clamp01(pulse_raw / PULSE_REF)
+            brightness = clamp01(centroid_hz / BRIGHTNESS_REF_HZ)
+            energy = clamp01(0.6 * energy_loud + 0.4 * danceability)  # composite arc target
+        else:
+            energy = danceability = brightness = 0.5
+
+        # Key confidence: prefer essentia strength; else cross-window key agreement; else neutral.
+        if key_strength is not None and 0.0 < float(key_strength) <= 1.0:
+            key_confidence = clamp01(key_strength)
+        elif len(per_window_keys) > 1:
+            top = max(set(per_window_keys), key=per_window_keys.count)
+            key_confidence = clamp01(per_window_keys.count(top) / len(per_window_keys))
+        else:
+            key_confidence = 0.5
+
+        return {
+            "energy": round(float(energy), 4),
+            "danceability": round(float(danceability), 4),
+            "brightness": round(float(brightness), 4),
+            "key_confidence": round(float(key_confidence), 4),
+            "feature_version": FEATURE_VERSION,
+        }
+    except Exception as e:
+        logger.warning("Feature aggregation failed: %s", e)
+        return {
+            "energy": 0.5, "danceability": 0.5, "brightness": 0.5,
+            "key_confidence": 0.5, "feature_version": FEATURE_VERSION,
+        }
+
+
+def compute_features_only(file_path: str) -> dict:
+    """Lazy-backfill features WITHOUT touching BPM. Reads ONE cheap mid-window and computes
+    only the audio features + essentia key strength. Never computes the BPM ensemble, beat
+    tracking, or beat grid, and never returns bpm/key/camelot/beat_grid. Returns
+    {energy, danceability, brightness, key_confidence, feature_version}."""
+    try:
+        import soundfile as sf
+        import librosa
+
+        info = sf.info(file_path)
+        track_duration = float(info.duration)
+
+        WIN_LEN = 45.0
+        start = 0.0 if track_duration < 90 else max(0.0, min(0.45 * track_duration, track_duration - WIN_LEN))
+        mono_seg, _ = _read_window(file_path, start, WIN_LEN)
+        if len(mono_seg) == 0:
+            raise ValueError("empty mid-window")
+
+        # Reuse the same onset_env recipe as _detect_window so `pulse` stays comparable.
+        HOP = 512
+        mono_22k = librosa.resample(mono_seg, orig_sr=44100, target_sr=22050)
+        _, y_perc = librosa.effects.hpss(mono_22k, margin=3.0)
+        onset_env = librosa.onset.onset_strength(
+            y=y_perc, sr=22050, hop_length=HOP,
+            aggregate=np.median, fmax=8000, n_mels=80,
+        )
+        win_features = _window_features(mono_seg, onset_env, sr=44100)
+
+        key_strength = None
+        try:
+            import essentia.standard as es
+            _kn, _scale, strength = es.KeyExtractor()(mono_seg.astype(np.float32))
+            key_strength = float(strength)
+        except Exception:
+            key_strength = None
+
+        return _aggregate_features([win_features], key_strength, [])
+    except Exception as e:
+        logger.warning("compute_features_only failed for %s: %s", file_path, e)
+        return {
+            "energy": 0.5, "danceability": 0.5, "brightness": 0.5,
+            "key_confidence": 0.5, "feature_version": FEATURE_VERSION,
+        }
+
+
+def _needs_features(entry: dict) -> bool:
+    """True when a cached/fast-path entry lacks current-version audio features."""
+    return isinstance(entry, dict) and entry.get("feature_version") != FEATURE_VERSION
 
 
 # ── File tag read/write ──
@@ -430,10 +583,56 @@ def read_algover_tag(file_path: str) -> int | None:
     return None
 
 
+def read_feature_ver_tag(file_path: str) -> int | None:
+    """Read the audio-feature version the file was last analyzed with."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("FEATURE_VER") or tags.get("feature_ver")
+    if val:
+        try:
+            return int(val[0])
+        except Exception:
+            pass
+    return None
+
+
+def read_feature_tags(file_path: str) -> dict | None:
+    """Read energy/danceability/brightness/key_confidence + feature_version from tags.
+    Returns the feature dict only when ALL feature values + a matching version are present;
+    otherwise None so the caller backfills."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    fv = read_feature_ver_tag(file_path)
+    if fv != FEATURE_VERSION:
+        return None
+    out = {}
+    for field, flac_key, mp3_key in [
+        ("energy", "ENERGY", "energy"),
+        ("danceability", "DANCEABILITY", "danceability"),
+        ("brightness", "BRIGHTNESS", "brightness"),
+        ("key_confidence", "KEY_CONFIDENCE", "key_confidence"),
+    ]:
+        val = tags.get(flac_key) or tags.get(mp3_key)
+        if not val:
+            return None
+        try:
+            out[field] = clamp01(float(val[0]))
+        except Exception:
+            return None
+    out["feature_version"] = FEATURE_VERSION
+    return out
+
+
 def write_tags(file_path: str, bpm: int = None, key: str = None,
                beat_anchor: float = None, intro_end: float = None,
-               outro_start: float = None, algo_ver: int = None):
-    """Write BPM, key, beat anchor, intro end, and outro start to file tags."""
+               outro_start: float = None, algo_ver: int = None,
+               energy: float = None, danceability: float = None,
+               brightness: float = None, key_confidence: float = None,
+               feature_ver: int = None):
+    """Write BPM, key, beat anchor, intro end, outro start, and audio features to file tags.
+    Feature tags are ADDITIVE — they never block the BPM tag write."""
     tags, fmt = _open_tags(file_path)
     if not tags:
         return
@@ -462,7 +661,9 @@ def write_tags(file_path: str, bpm: int = None, key: str = None,
                     from mutagen.id3 import TXXX
                     EasyID3.RegisterTXXXKey("beat_anchor", "BEAT_ANCHOR")
                 tags["beat_anchor"] = str(round(beat_anchor, 3))
-        for tag_name, value in [("INTRO_END", intro_end), ("OUTRO_START", outro_start)]:
+        for tag_name, value in [("INTRO_END", intro_end), ("OUTRO_START", outro_start),
+                                ("ENERGY", energy), ("DANCEABILITY", danceability),
+                                ("BRIGHTNESS", brightness), ("KEY_CONFIDENCE", key_confidence)]:
             if value is not None:
                 if fmt == "flac":
                     tags[tag_name] = str(round(value, 3))
@@ -473,6 +674,15 @@ def write_tags(file_path: str, bpm: int = None, key: str = None,
                         from mutagen.id3 import TXXX
                         EasyID3.RegisterTXXXKey(lk, tag_name)
                     tags[lk] = str(round(value, 3))
+        if feature_ver is not None:
+            if fmt == "flac":
+                tags["FEATURE_VER"] = str(feature_ver)
+            else:
+                from mutagen.easyid3 import EasyID3
+                if "feature_ver" not in EasyID3.valid_keys:
+                    from mutagen.id3 import TXXX
+                    EasyID3.RegisterTXXXKey("feature_ver", "FEATURE_VER")
+                tags["feature_ver"] = str(feature_ver)
         if algo_ver is not None:
             if fmt == "flac":
                 tags["BPM_ALGO_VER"] = str(algo_ver)
@@ -513,11 +723,11 @@ def _analyze_or_read_tag(file_path: str) -> dict:
     if (existing_bpm and existing_key and existing_anchor is not None
             and existing_intro is not None and existing_outro is not None
             and existing_ver == BPM_ALGO_VERSION):
-        # All tags present AND analyzed by the current algorithm — fast path.
+        # All tags present AND analyzed by the current algorithm — fast path (BPM untouched).
         bpm = float(existing_bpm)
         camelot = CAMELOT_MAP.get(existing_key)
         beat_grid, track_duration = _reconstruct_beat_grid(bpm, existing_anchor, file_path)
-        return {
+        result = {
             "bpm": bpm, "confidence": 1.0,
             "raw": {"tag_bpm": existing_bpm, "tag_key": existing_key},
             "normalized": {"tag": bpm},
@@ -527,6 +737,21 @@ def _analyze_or_read_tag(file_path: str) -> dict:
             "outro_start": existing_outro,
             "algo_version": BPM_ALGO_VERSION,
         }
+        # Lazy feature backfill — never blocks/breaks the BPM fast path.
+        feats = read_feature_tags(file_path)
+        if feats is None:
+            feats = compute_features_only(file_path)
+            try:
+                write_tags(file_path,
+                           energy=feats.get("energy"),
+                           danceability=feats.get("danceability"),
+                           brightness=feats.get("brightness"),
+                           key_confidence=feats.get("key_confidence"),
+                           feature_ver=FEATURE_VERSION)
+            except Exception as e:
+                logger.warning("Feature tag write failed for %s: %s", file_path, e)
+        result.update(feats)
+        return result
 
     # Need full analysis (missing tag(s))
     result = analyze_bpm(file_path)
@@ -538,7 +763,12 @@ def _analyze_or_read_tag(file_path: str) -> dict:
                beat_anchor=anchor,
                intro_end=result.get("intro_end"),
                outro_start=result.get("outro_start"),
-               algo_ver=BPM_ALGO_VERSION)
+               algo_ver=BPM_ALGO_VERSION,
+               energy=result.get("energy"),
+               danceability=result.get("danceability"),
+               brightness=result.get("brightness"),
+               key_confidence=result.get("key_confidence"),
+               feature_ver=FEATURE_VERSION)
     return result
 
 
@@ -584,11 +814,28 @@ async def _get_audio_file(song_id: str, name: str, artist: str) -> str | None:
 _analysis_locks: dict[str, asyncio.Lock] = {}
 
 
+async def _backfill_features(entry: dict, song_id: str, name: str, artist: str) -> dict:
+    """Lazily enrich a cached BPM entry with audio features WITHOUT recomputing BPM.
+    Only the feature fields are merged in — bpm/key/camelot/beat_grid stay untouched.
+    Returns the (possibly enriched) entry."""
+    if not _needs_features(entry):
+        return entry
+    file_path = await _get_audio_file(song_id, name, artist)
+    if not file_path:
+        return entry  # can't backfill without audio — leave BPM data intact
+    loop = asyncio.get_event_loop()
+    feats = await loop.run_in_executor(_executor, compute_features_only, file_path)
+    entry.update(feats)  # feats contains ONLY feature fields → never overwrites bpm/key/grid
+    _bpm_cache[_cache_key(name, artist)] = entry
+    _save_cache()
+    return entry
+
+
 async def analyze_track(song_id: str, name: str, artist: str,
                         force: bool = False) -> dict | None:
     key = _cache_key(name, artist)
     if not force and key in _bpm_cache:
-        return _bpm_cache[key]
+        return await _backfill_features(_bpm_cache[key], song_id, name, artist)
 
     # Per-track lock: only one analysis at a time per track
     if key not in _analysis_locks:
@@ -596,7 +843,7 @@ async def analyze_track(song_id: str, name: str, artist: str,
     async with _analysis_locks[key]:
         # Re-check cache after acquiring lock (another request may have finished)
         if not force and key in _bpm_cache:
-            return _bpm_cache[key]
+            return await _backfill_features(_bpm_cache[key], song_id, name, artist)
 
         file_path = await _get_audio_file(song_id, name, artist)
         if not file_path:

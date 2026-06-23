@@ -399,6 +399,7 @@ const _playedKeys = new Set();
 // and READ (never mutated) in pickSmartNext(). This keeps pickSmartNext side-effect-free
 // and keeps every value stable between a prediction call and its matching commit call.
 let _setStartBpm = null;      // BPM of the first track marked in the current smart set
+let _setStartEnergy = null;   // energy (0..1) of the first track marked in the current smart set (energy-arc anchor)
 let _playedCount = 0;         // number of real advances in the current set (tempo-arc clock)
 let _setSalt = 0;             // per-set jitter salt: constant within a set, varies across sets
 const _recentArtists = [];    // ring buffer of last N distinct artists (recency diversity)
@@ -460,6 +461,7 @@ function _artistKey(item) {
 export function resetSmartQueuePlayed() {
   _playedKeys.clear();
   _setStartBpm = null;
+  _setStartEnergy = null;
   _playedCount = 0;
   // Vary the jitter salt per set so each set explores a different deterministic ordering,
   // while staying CONSTANT within a set (predict==commit). resetSmartQueuePlayed runs once
@@ -476,11 +478,14 @@ export function markPlayed(item) {
   if (!item) return;
   _playedKeys.add(_trackKey(item));
 
-  // Capture the set's starting BPM from the first marked track's DJ data (if known),
-  // anchoring the tempo arc. Falls back silently when DJ data isn't cached yet.
-  if (_setStartBpm == null) {
+  // Capture the set's starting BPM + energy from the first marked track's DJ data (anchors
+  // the tempo + energy arcs). One shared cache lookup. Falls back silently when uncached.
+  if (_setStartBpm == null || _setStartEnergy == null) {
     const d = getDjData(_djDecode(item.name), _djDecode(item.artist));
-    if (d && d.bpm) _setStartBpm = d.bpm;
+    if (d) {
+      if (_setStartBpm == null && d.bpm) _setStartBpm = d.bpm;
+      if (_setStartEnergy == null && Number.isFinite(d.energy)) _setStartEnergy = d.energy;
+    }
   }
   _playedCount++;
 
@@ -515,6 +520,14 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
   const _ad = parseFloat(_djSetting('dj_artist_diversity', '6'));
   const ARTIST_DIVERSITY = Number.isFinite(_ad) ? _ad : 6; // 0 disables; NaN→default
 
+  // NaN-safe numeric setting parse (mirrors the dj_key_weight / dj_tempo_* guards above).
+  const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
+  const E_RAMP   = num(_djSetting('dj_energy_ramp','0.0375'), 0.0375); // energy/track during warm-up (peak/peak_at → apex at E_PEAKAT)
+  const E_PEAK   = num(_djSetting('dj_energy_peak','0.30'), 0.30);    // max above start
+  const E_PEAKAT = parseInt(_djSetting('dj_energy_peak_at','8'),10) || 8; // track # of apex
+  const E_COOL   = num(_djSetting('dj_energy_cooldown','0.02'), 0.02);// decline/track after peak
+  const E_WEIGHT = num(_djSetting('dj_energy_weight','6'), 6);        // BPM-equiv weight of energy distance
+
   const curBpm = currentDjData.bpm;
   const curCamelot = currentDjData.camelot;
 
@@ -539,6 +552,16 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     ? _setStartBpm + Math.min(_playedCount * ramp, peak)
     : curBpm;
 
+  // ---- A2. Energy arc (warm-up → peak → cooldown) ----
+  // Mirrors the tempo arc: read-only, driven by _setStartEnergy + _playedCount (both written
+  // ONLY in markPlayed). Ramps up to E_PEAK above the set's start energy by track E_PEAKAT,
+  // then declines by E_COOL/track. Absent start energy → neutral 0.5 anchor. Clamped to 0..1.
+  const startE = (_setStartEnergy != null) ? _setStartEnergy : 0.5;
+  let targetEnergy = (_playedCount <= E_PEAKAT)
+    ? startE + Math.min(_playedCount * E_RAMP, E_PEAK)
+    : startE + Math.max(0, E_PEAK - (_playedCount - E_PEAKAT) * E_COOL);
+  targetEnergy = Math.max(0, Math.min(1, targetEnergy));
+
   // Distinct number of track keys in the queue (duplicates collapse).
   const distinctKeys = new Set(queue.map(_trackKey));
   const allPlayed = _playedKeys.size >= distinctKeys.size;
@@ -549,9 +572,16 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
    */
   const keyBonus = (data) => {
     if (mode === 'bpm_key' && curCamelot && data.camelot) {
+      // Scale harmonic pull by the WEAKER of the two key confidences: an uncertain key on
+      // either side earns less pull. Absent confidence → 1.0 (full pull) so behavior is
+      // unchanged before the lazy backfill fills key_confidence; a KNOWN-low confidence then
+      // reduces the pull. Pure function of cached data.* (determinism preserved).
+      const kc = Number.isFinite(data.key_confidence) ? data.key_confidence : 1.0;
+      const curKc = Number.isFinite(currentDjData.key_confidence) ? currentDjData.key_confidence : 1.0;
+      const trust = Math.min(kc, curKc);
       const style = getTransitionStyle(curCamelot, data.camelot);
-      if (style === 'blend') return KEY_WEIGHT;
-      if (style === 'bass_swap') return KEY_WEIGHT / 2;
+      if (style === 'blend')     return KEY_WEIGHT * trust;
+      if (style === 'bass_swap') return (KEY_WEIGHT / 2) * trust;
     }
     return 0;
   };
@@ -589,10 +619,12 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // the track key (salted per-set so each set differs) gives variety while staying
     // identical across calls WITHIN a set (the salt is fixed for the set).
     const jitter = _jitterFor(key);
+    const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
     const score = Math.abs(data.bpm - target)
       + (1 - conf) * CONF_PENALTY
       - keyBonus(data)
       + artistPenalty(item)
+      + eDist
       + jitter;
     const inBand = Math.abs(data.bpm - target) <= BAND;
     trusted.push({ idx: i, score, inBand });
@@ -645,10 +677,12 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     if (!data || !data.bpm) continue; // no cached BPM at all → not scoreable here
     const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
     const jitter = _jitterFor(key);
+    const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
     const score = Math.abs(data.bpm - target)
       + (1 - conf) * LOW_CONF_PENALTY
       - keyBonus(data)
       + artistPenalty(item)
+      + eDist
       + jitter;
     if (score < bestLowScore) { bestLowScore = score; bestLowIdx = i; }
   }
