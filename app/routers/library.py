@@ -61,6 +61,28 @@ def _save_likes(data: dict):
     os.replace(tmp, LIKES_FILE)
 
 
+async def _playlists_containing(playlists: list, name: str, artist: str) -> list:
+    """Return [{id, name}] for playlists that contain the given track.
+
+    Fetches playlist details with bounded concurrency (avoids serial N+1
+    Navidrome round-trips on large libraries while capping parallel load).
+    """
+    sem = asyncio.Semaphore(8)
+
+    async def _check(pl: dict):
+        async with sem:
+            detail = await library.get_playlist(pl["id"])
+        if not detail:
+            return None
+        for t in detail["tracks"]:
+            if library._matches(t.get("name", ""), name) and library._artist_matches(t.get("artist", ""), artist):
+                return {"id": pl["id"], "name": pl["name"]}
+        return None
+
+    results = await asyncio.gather(*[_check(pl) for pl in playlists])
+    return [r for r in results if r]
+
+
 @router.get("/cover/{cover_id}")
 async def get_cover_art(cover_id: str):
     data = await library.get_cover_art(cover_id)
@@ -181,7 +203,9 @@ async def add_and_download(playlist_id: str, req: AddTrackByNameRequest, user: d
     song_id = await library.find_song_id(req.name, req.artist, req.album)
     if song_id:
         ok = await library.update_playlist(playlist_id, song_ids_to_add=[song_id])
-        return {"status": "added" if ok else "error"}
+        if not ok:
+            raise HTTPException(500, "Failed to add track to playlist")
+        return {"status": "added"}
 
     # Not in library — start download with playlist_id callback
     from app.services import settings as app_settings
@@ -249,17 +273,9 @@ async def add_and_download_batch(playlist_id: str, req: BatchAddRequest, user: d
 @router.post("/track/delete")
 async def delete_track(req: AddTrackByNameRequest, user: dict = Depends(auth.get_current_user)):
     """Delete a track file from disk. Returns playlists it belongs to for confirmation."""
-    # Check which playlists contain this track
+    # Check which playlists contain this track (bounded parallel fetches)
     playlists = await library.get_playlists()
-    in_playlists = []
-    for pl in playlists:
-        detail = await library.get_playlist(pl["id"])
-        if not detail:
-            continue
-        for t in detail["tracks"]:
-            if library._matches(t.get("name", ""), req.name) and library._artist_matches(t.get("artist", ""), req.artist):
-                in_playlists.append({"id": pl["id"], "name": pl["name"]})
-                break
+    in_playlists = await _playlists_containing(playlists, req.name, req.artist)
 
     # Delete the file
     ok = player.delete_track_file(req.name, req.artist)
@@ -286,15 +302,7 @@ async def delete_album(req: DeleteAlbumRequest, user: dict = Depends(auth.get_cu
 async def check_track_playlists(req: AddTrackByNameRequest, user: dict = Depends(auth.get_current_user)):
     """Check which playlists contain a track (for delete confirmation)."""
     playlists = await library.get_playlists()
-    in_playlists = []
-    for pl in playlists:
-        detail = await library.get_playlist(pl["id"])
-        if not detail:
-            continue
-        for t in detail["tracks"]:
-            if library._matches(t.get("name", ""), req.name) and library._artist_matches(t.get("artist", ""), req.artist):
-                in_playlists.append({"id": pl["id"], "name": pl["name"]})
-                break
+    in_playlists = await _playlists_containing(playlists, req.name, req.artist)
     has_file = player.find_track_file(req.name, req.artist) is not None
     return {"has_file": has_file, "in_playlists": in_playlists}
 

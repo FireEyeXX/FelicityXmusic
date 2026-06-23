@@ -357,7 +357,7 @@ async def _run_ytdlp(job: Job):
     else:
         job.progress_text = f"Downloaded {total} {label}"
 
-    return True
+    return len(failed) < total
 
 
 async def _slskd_api(method: str, path: str, json_data: dict = None) -> dict | list | None:
@@ -610,16 +610,12 @@ async def _trigger_navidrome_scan():
         async with httpx.AsyncClient() as client:
             await client.get(
                 f"{NAVIDROME_URL}/rest/startScan",
-                params={
-                    "v": "1.16.1",
-                    "c": "music-seeker",
-                    "u": library.NAVIDROME_USER,
-                    "p": NAVIDROME_PASSWORD,
-                },
+                params=library._params(),
                 timeout=10,
             )
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.getLogger("musicseeker").warning(f"Navidrome scan trigger failed: {e}")
 
 
 async def _create_navidrome_playlist(job: Job, needs_scan: bool = True):

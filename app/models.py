@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
@@ -119,7 +119,7 @@ class DeleteAlbumRequest(BaseModel):
 
 class RecommendationRequest(BaseModel):
     tracks: list[dict]
-    limit: int = 15
+    limit: int = Field(15, ge=1, le=50)
     skipped: list[dict] = []
     accepted: list[dict] = []
     tempo_coherent: bool = False

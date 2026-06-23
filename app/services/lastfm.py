@@ -17,7 +17,7 @@ def _cache_key(method: str, params: dict | None) -> str:
     return "|".join(parts)
 
 
-async def _get(method: str, params: dict = None) -> dict:
+async def _get(method: str, params: dict | None = None) -> dict:
     key = _cache_key(method, params)
     now = time.time()
     cached = _cache.get(key)
@@ -30,6 +30,8 @@ async def _get(method: str, params: dict = None) -> dict:
         resp = await client.get(LASTFM_URL, params=p)
         resp.raise_for_status()
         data = resp.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"Last.fm error {data.get('error')}: {data.get('message', '')}")
     _cache[key] = (now, data)
     return data
 
@@ -45,7 +47,11 @@ def _pick_image(images: list) -> str:
 async def get_top_tags(limit: int = 50) -> list[dict]:
     data = await _get("tag.getTopTags")
     tags = data.get("toptags", {}).get("tag", [])
-    return [{"name": t["name"], "count": int(t.get("count", 0))} for t in tags[:limit]]
+    return [
+        {"name": t.get("name", ""), "count": int(t.get("count", 0))}
+        for t in tags[:limit]
+        if t.get("name")
+    ]
 
 
 async def get_tag_tracks(tag: str, limit: int = 20, page: int = 1) -> list[dict]:

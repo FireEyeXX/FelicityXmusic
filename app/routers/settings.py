@@ -3,7 +3,7 @@ import re
 from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File
 
 from app.models import SettingsUpdate, LibraryCheckRequest, DeviceSettingRequest
-from app.services import auth, settings as app_settings, recognize, search_providers, library
+from app.services import auth, settings as app_settings, recognize, search_providers, library, recognize_history
 from app.dependencies import _get_device_id
 
 _DEVICE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
@@ -46,6 +46,13 @@ async def recognize_song(audio: UploadFile = File(...), user: dict = Depends(aut
                 result["url"] = tracks[0].get("url", "")
         except Exception:
             pass
+
+    try:
+        recognize_history.add_entry(
+            user["username"], result, recognized_by=result.get("recognized_by", "")
+        )
+    except Exception:
+        pass
 
     return result
 

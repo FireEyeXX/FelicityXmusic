@@ -23,7 +23,11 @@ def load_favorites(username: str) -> dict:
     if os.path.exists(path):
         try:
             with open(path) as f:
-                return json.load(f)
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+            data.setdefault("artists", [])
+            return data
         except (json.JSONDecodeError, OSError):
             pass
     return {"artists": []}

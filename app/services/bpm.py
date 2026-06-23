@@ -288,20 +288,28 @@ def analyze_bpm(file_path: str) -> dict:
     HOP = 512
     sr22 = 22050
     forced_bpm = raw.get("librosa_tempo_0", 85)
-    # Intro: first 30s
-    intro_len = min(30.0, track_duration)
-    intro_mono, _ = _read_window(file_path, 0.0, intro_len)
-    intro_22k = librosa.resample(intro_mono, orig_sr=44100, target_sr=sr22)
-    _, intro_frames = librosa.beat.beat_track(y=intro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
-    intro_beats = librosa.frames_to_time(intro_frames, sr=sr22, hop_length=HOP).tolist()
-    del intro_22k, intro_mono
-    # Outro: last 60s
-    outro_offset = max(0.0, track_duration - 60.0)
-    outro_mono, _ = _read_window(file_path, outro_offset, track_duration - outro_offset)
-    outro_22k = librosa.resample(outro_mono, orig_sr=44100, target_sr=sr22)
-    _, outro_frames = librosa.beat.beat_track(y=outro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
-    outro_beats = [round(t + outro_offset, 3) for t in librosa.frames_to_time(outro_frames, sr=sr22, hop_length=HOP).tolist()]
-    del outro_22k, outro_mono
+    # Intro: first 30s — a corrupt intro region must not abort the whole analysis.
+    intro_beats = []
+    try:
+        intro_len = min(30.0, track_duration)
+        intro_mono, _ = _read_window(file_path, 0.0, intro_len)
+        intro_22k = librosa.resample(intro_mono, orig_sr=44100, target_sr=sr22)
+        _, intro_frames = librosa.beat.beat_track(y=intro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
+        intro_beats = librosa.frames_to_time(intro_frames, sr=sr22, hop_length=HOP).tolist()
+        del intro_22k, intro_mono
+    except Exception as e:
+        logger.warning("BPM intro beat read failed: %s", e)
+    # Outro: last 60s — a corrupt outro region must not abort the whole analysis.
+    outro_beats = []
+    try:
+        outro_offset = max(0.0, track_duration - 60.0)
+        outro_mono, _ = _read_window(file_path, outro_offset, track_duration - outro_offset)
+        outro_22k = librosa.resample(outro_mono, orig_sr=44100, target_sr=sr22)
+        _, outro_frames = librosa.beat.beat_track(y=outro_22k, sr=sr22, hop_length=HOP, bpm=forced_bpm, tightness=120)
+        outro_beats = [round(t + outro_offset, 3) for t in librosa.frames_to_time(outro_frames, sr=sr22, hop_length=HOP).tolist()]
+        del outro_22k, outro_mono
+    except Exception as e:
+        logger.warning("BPM outro beat read failed: %s", e)
     full_beats = sorted(set(intro_beats + outro_beats))
 
     # ── Weighted median over ALL (window × detector) folded values ──

@@ -366,6 +366,10 @@ async def update_playlist(playlist_id: str, song_ids_to_add: list[str] | None = 
     """Add or remove tracks from a Navidrome playlist."""
     if not NAVIDROME_PASSWORD:
         return False
+    # No-op request: nothing to add or remove. Return False so callers don't
+    # report a successful "added"/"removed" when nothing happened.
+    if not song_ids_to_add and not song_indices_to_remove:
+        return False
     async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
         param_list = list(_params(playlistId=playlist_id).items())
         if song_ids_to_add:
@@ -404,30 +408,36 @@ async def rename_playlist(playlist_id: str, name: str) -> bool:
 
 
 async def reorder_playlist(playlist_id: str, song_ids: list[str]) -> bool:
-    """Reorder a playlist by removing all tracks and re-adding in new order."""
+    """Reorder a playlist using add-before-remove to avoid data loss.
+
+    Appends the new ordered ids FIRST, then removes the original leading
+    entries only after all adds succeed. If any add fails, the original
+    tracks are still intact (Subsonic appends, removes by current index)."""
     if not NAVIDROME_PASSWORD or not song_ids:
         return False
     async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
-        # Remove all existing tracks (by indices, descending to avoid shift)
         pl = await get_playlist(playlist_id)
         if not pl:
             return False
         count = len(pl["tracks"])
-        if count > 0:
-            # Remove all tracks in one call (all indices)
-            param_list = list(_params(playlistId=playlist_id).items())
-            for i in range(count - 1, -1, -1):
-                param_list.append(("songIndexToRemove", str(i)))
-            resp = await client.get("/rest/updatePlaylist", params=param_list)
-            resp.raise_for_status()
 
-        # Re-add in new order (batches of 20)
+        # Add new ordered ids FIRST (batches of 20). These append after the
+        # existing `count` entries. Any failure here leaves originals intact.
         batch_size = 20
         for i in range(0, len(song_ids), batch_size):
             batch = song_ids[i:i + batch_size]
             param_list = list(_params(playlistId=playlist_id).items())
             for sid in batch:
                 param_list.append(("songIdToAdd", sid))
+            resp = await client.get("/rest/updatePlaylist", params=param_list)
+            resp.raise_for_status()
+
+        # Only after all adds succeeded: remove the ORIGINAL leading indices
+        # (0..count-1), descending to avoid index shift.
+        if count > 0:
+            param_list = list(_params(playlistId=playlist_id).items())
+            for i in range(count - 1, -1, -1):
+                param_list.append(("songIndexToRemove", str(i)))
             resp = await client.get("/rest/updatePlaylist", params=param_list)
             resp.raise_for_status()
 
@@ -526,28 +536,34 @@ async def replace_playlist_by_names(playlist_id: str, tracks: list[dict]) -> dic
     song_ids = [sid for _, sid in pairs if sid]
     missing = [t for t, sid in pairs if not sid]
 
-    # Clear existing entries
+    # Nothing matched: never clear the existing playlist on zero matches.
+    if not song_ids:
+        return {"matched": 0, "missing": missing}
+
+    # Add-before-remove: add the new ids FIRST so a failed add leaves the
+    # original tracks intact. Only remove the originals after adds succeed.
     pl = await get_playlist(playlist_id)
-    if pl and pl.get("tracks"):
-        count = len(pl["tracks"])
-        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
+    orig_count = len(pl["tracks"]) if pl and pl.get("tracks") else 0
+
+    async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
+        # Add new ids in batches (appended after the existing entries)
+        batch_size = 20
+        for i in range(0, len(song_ids), batch_size):
+            batch = song_ids[i:i + batch_size]
             param_list = list(_params(playlistId=playlist_id).items())
-            for i in range(count - 1, -1, -1):
-                param_list.append(("songIndexToRemove", str(i)))
+            for sid in batch:
+                param_list.append(("songIdToAdd", sid))
             resp = await client.get("/rest/updatePlaylist", params=param_list)
             resp.raise_for_status()
 
-    # Add new ids in batches
-    if song_ids:
-        async with httpx.AsyncClient(base_url=NAVIDROME_URL, timeout=30) as client:
-            batch_size = 20
-            for i in range(0, len(song_ids), batch_size):
-                batch = song_ids[i:i + batch_size]
-                param_list = list(_params(playlistId=playlist_id).items())
-                for sid in batch:
-                    param_list.append(("songIdToAdd", sid))
-                resp = await client.get("/rest/updatePlaylist", params=param_list)
-                resp.raise_for_status()
+        # Only after all adds succeeded: remove the ORIGINAL leading entries
+        # (indices 0..orig_count-1), descending to avoid index shift.
+        if orig_count > 0:
+            param_list = list(_params(playlistId=playlist_id).items())
+            for i in range(orig_count - 1, -1, -1):
+                param_list.append(("songIndexToRemove", str(i)))
+            resp = await client.get("/rest/updatePlaylist", params=param_list)
+            resp.raise_for_status()
 
     return {"matched": len(song_ids), "missing": missing}
 
