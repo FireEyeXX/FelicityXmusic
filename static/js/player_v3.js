@@ -7,7 +7,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
 import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
 import { getDjData } from './bpm.js';
 import * as cast from './cast.js';
@@ -889,6 +889,10 @@ function _nextTrackInQueue() {
     // sequentially as before. Otherwise (last index) fall through to the same
     // repeat-all / radio / rec terminal handling the non-smart path uses.
     if (store.playerIndex < store.playerQueue.length - 1) {
+      // M(#12): in smart mode, mark the outgoing track played even on the SEQUENTIAL
+      // fallback (pickSmartNext returned null) — otherwise the energy-arc clock stalls
+      // and an already-heard track can be re-selected later. Don't mark when smart is off.
+      if (smartMode !== 'off') markPlayed(store.playerQueue[store.playerIndex]);
       store.playerIndex++;
       loadAndPlay();
       return;
@@ -1041,6 +1045,12 @@ function updateMediaSessionWith(item) {
 }
 
 export function prevTrack() {
+  // #13: respect the single-flight advance latch. Without this, pressing Previous during
+  // an in-flight auto-advance runs a concurrent loadAndPlay() and clears the latch out
+  // from under nextTrack → overlapping crossfades. Claim it synchronously at entry; it is
+  // released by loadAndPlay's finally on paths that load, and explicitly here otherwise.
+  if (_advanceInFlight) return;
+  _advanceInFlight = true;
   if (store.castDevice) {
     cast.markCastTransition();
   }
@@ -1048,19 +1058,28 @@ export function prevTrack() {
   import('./recommendations.js').then(m => {
     if (m.isPlayingRec()) {
       const went = m.playPrevRec();
-      if (!went) {
-        // Back to last track in queue
-        if (store.playerIndex >= 0) loadAndPlay();
+      if (!went && store.playerIndex >= 0) {
+        // Back to last track in queue — loadAndPlay's finally releases the latch.
+        loadAndPlay();
+      } else {
+        // playPrevRec advanced without loadAndPlay (or nothing to do) — release the latch.
+        _advanceInFlight = false;
       }
       return;
     }
     // Normal queue navigation
     if (!store.castDevice && _activeDeckEl().currentTime > 3) {
       _activeDeckEl().currentTime = 0;
+      _advanceInFlight = false; // seek-to-start, no loadAndPlay — release latch
     } else if (store.playerIndex > 0) {
       store.playerIndex--;
-      loadAndPlay();
+      loadAndPlay(); // finally releases the latch
+    } else {
+      _advanceInFlight = false; // at first track, nothing advanced — release latch
     }
+  }).catch(() => {
+    // Import failed — loadAndPlay never ran; release the latch so future advances aren't wedged.
+    _advanceInFlight = false;
   });
 }
 
@@ -1236,8 +1255,18 @@ export function init() {
       if (!_isExpectedSrc(deck)) return; // ignore deferred errors from previous sources
       if (deck !== _activeDeckEl() && !_crossfading) return;
       if (_advanceInFlight) return; // an advance is already resolving — don't double-fire
+      // #14: a benign error on the FADING-OUT (outgoing) deck must NOT abort the
+      // transition or skip the good incoming track. The incoming deck is now the
+      // active deck (_startCrossfade swapped it), so let it keep playing — just stop
+      // and reset the erroring outgoing deck. Only the active/incoming deck erroring
+      // is a real failure that warrants teardown + skip.
+      if (_crossfading && deck === _fadingOutDeck && deck !== _activeDeckEl()) {
+        deck.pause(); deck.src = '';
+        resetDeckAfterTransitionV3(_deckDesc(deck));
+        return; // incoming (active) deck continues the crossfade
+      }
       if (_crossfading) {
-        // Error on incoming deck during crossfade — abort crossfade, skip track.
+        // Error on incoming (active) deck during crossfade — abort crossfade, skip track.
         // Use _teardownCrossfade() so the tempo ramp (_cancelTempoRamp) is cancelled too;
         // the old inline cleanup left the rAF tempo ramp writing playbackRate on the deck
         // error-recovery reuses → tempo drift/glitch (the bug _teardownCrossfade prevents).
@@ -1325,6 +1354,9 @@ export function init() {
           // track boundary (the beat-grid lead of ~11s but ≤10s fade caused a gap).
           const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
           triggerAt = webkitCrossfadeDuration(_outDjData?.bpm, numBeats);
+          // #36: mirror the beat-grid clamp — on short tracks a long beat-derived fade
+          // would trigger too early. Never trigger earlier than 25% from end, max 30s.
+          if (triggerAt > dur * 0.25 || triggerAt > 30) triggerAt = _crossfadeDur();
         } else if (_outDjData && _outDjData.beat_grid && _outDjData.bpm) {
           const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
           const startBeat = findCrossfadeStartBeat(_outDjData.beat_grid, effectiveEnd, numBeats);
