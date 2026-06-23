@@ -37,6 +37,13 @@ let currentLibPlaylistTracks = [];
 let _selectSet = new Set(); // indices of selected cards
 let _lastSelectIdx = -1;    // last single-clicked index for shift-range
 
+// Current playlist context for the (persistent) #libraryTracks context menu.
+// The menu listener is attached ONCE on the persistent node; each detail load
+// just updates this var so the handler reads the current playlist — avoids
+// re-attaching (and leaking) listeners on every visit.
+let _ctxPlaylistId = null;
+let _ctxPlaylistName = '';
+
 // ── Load Playlists ──
 export async function loadLibrary() {
   const grid = $('#libraryGrid');
@@ -244,11 +251,14 @@ function _libraryTrackInfo(targetEl, playlistId, playlistName) {
 function _attachLibraryTrackContextMenu(playlistId, playlistName) {
   const el = $('#libraryTracks');
   if (!el) return;
-  // Reset guard so attachContextMenu re-registers listeners for this container
-  el.__ctxAttached = false;
+  // Update the current playlist context; the listener below reads these module
+  // vars, so re-renders only refresh the context — never reset __ctxAttached.
+  _ctxPlaylistId = playlistId;
+  _ctxPlaylistName = playlistName;
+  // Attach the listener exactly once on the persistent #libraryTracks node.
   attachContextMenu(el, {
     selector: '.card[data-item]',
-    getItem: (targetEl) => _libraryTrackInfo(targetEl, playlistId, playlistName),
+    getItem: (targetEl) => _libraryTrackInfo(targetEl, _ctxPlaylistId, _ctxPlaylistName),
   });
 }
 
@@ -508,15 +518,7 @@ function _addRemoveButtons(playlistId) {
         await apiJson(`/api/library/playlist/${playlistId}/tracks`, {
           method: 'DELETE', body: { indices: [i] },
         });
-        card.remove();
-        currentLibPlaylistTracks.splice(i, 1);
-        _setLibDetailCount();
         showToast('Removed from playlist');
-        // Re-index remaining buttons
-        $$('#libraryTracks .lib-track-remove').forEach((b, j) => {
-          b.replaceWith(b); // will lose handler, so just reload
-        });
-        // Simpler: reload the whole detail
         loadLibraryDetail(playlistId);
       } catch (err) { showToast('Failed: ' + (err.message || '')); }
     });
@@ -570,6 +572,24 @@ export async function openLikedSongs() {
   renderResults(tracks, '#likedSongsTracks');
 }
 
+// Re-render the open Liked Songs view from the current liked set. Called on
+// `likeschange` so unliking a row removes it (no ghost row) and the count stays
+// in sync without a full reload.
+function _rerenderLikedSongs() {
+  if (!_likedViewOpen) return;
+  const tracksEl = $('#likedSongsTracks');
+  if (!tracksEl) return;
+  const tracks = getLikedTracks();
+  const countEl = $('#likedDetailCount');
+  if (countEl) countEl.textContent = tracks.length === 1 ? '1 song' : `${tracks.length} songs`;
+  _refreshLikedCount();
+  if (!tracks.length) {
+    tracksEl.innerHTML = '<div class="empty-state"><p>Songs you like will appear here.</p></div>';
+    return;
+  }
+  renderResults(tracks, '#likedSongsTracks');
+}
+
 export function closeLikedSongs(fromPopstate) {
   if (!_likedViewOpen) return;
   $('#likedSongsDetail').style.display = 'none';
@@ -600,6 +620,10 @@ export function init() {
   if (likedTile) likedTile.addEventListener('click', () => openLikedSongs());
   const likedBack = $('#backToLibraryFromLiked');
   if (likedBack) likedBack.addEventListener('click', () => closeLikedSongs());
+  // Keep the open Liked Songs view in sync — unliking a row removes it and
+  // updates the count instead of leaving a stale ghost row.
+  window.addEventListener('likeschange', () => _rerenderLikedSongs());
+
   const playLiked = $('#playLikedSongs');
   if (playLiked) playLiked.addEventListener('click', () => {
     const tracks = _getLikedTracksForPlayer();
@@ -666,6 +690,7 @@ export function init() {
         store.playlistMode.name = name;
       }
       libraryCache = null;
+      loadLibrary();
       showToast('Playlist renamed');
     } catch (e) {
       showToast('Failed to rename');
@@ -695,6 +720,8 @@ export function init() {
       }
       libraryCache = null;
       showToast(`Duplicated as "${name}" (${songIds.length} tracks)`);
+      closeLibraryDetail();
+      loadLibrary();
     } catch (e) {
       showToast('Failed to duplicate');
     }
@@ -705,7 +732,9 @@ export function init() {
   if (bulkToggle) bulkToggle.addEventListener('change', () => {
     const cards = $$('#libraryTracks .card');
     if (bulkToggle.checked) {
-      cards.forEach((_, i) => _selectSet.add(i));
+      // Only select visible cards — BPM-filtered (display:none) tracks excluded,
+      // matching Play All / Queue All which act on the visible set.
+      cards.forEach((c, i) => { if (c.style.display !== 'none') _selectSet.add(i); });
     } else {
       _selectSet.clear();
     }

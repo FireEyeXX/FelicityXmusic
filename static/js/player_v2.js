@@ -1076,7 +1076,8 @@ export function init() {
   if ($('#fpAddToPlaylist')) $('#fpAddToPlaylist').addEventListener('click', _addToPlaylist);
 
   async function _removeFromPlaylist() {
-    const item = store.playerIndex >= 0 ? store.playerQueue[store.playerIndex] : null;
+    const idx = store.playerIndex;
+    const item = idx >= 0 ? store.playerQueue[idx] : null;
     if (!item || !store.playlistMode) return;
     try {
       const cleanName = _decodeEntities(item.name || '');
@@ -1085,6 +1086,24 @@ export function init() {
         method: 'POST', body: { name: cleanName, artist: cleanArtist },
       });
       showToast(`Removed from ${store.playlistMode.name}`);
+      // Mirror the backend removal in the local queue / now-playing UI.
+      if (idx >= 0 && idx < store.playerQueue.length) {
+        const wasCurrent = (idx === store.playerIndex);
+        store.playerQueue.splice(idx, 1);
+        if (idx < store.playerIndex) store.playerIndex--;
+        else if (wasCurrent) {
+          if (store.playerIndex >= store.playerQueue.length) store.playerIndex = store.playerQueue.length - 1;
+          if (store.playerIndex >= 0) {
+            try { const a = getAudio(); if (a) a.pause(); } catch (e) {}
+            loadAndPlay();
+          } else {
+            // Queue emptied: stop the track that was just removed.
+            try { const a = getAudio(); if (a) a.pause(); } catch (e) {}
+          }
+        }
+        renderQueue();
+        saveQueueDebounced();
+      }
     } catch (e) { showToast('Failed: ' + (e.message || '')); }
   }
   $('#playerRemoveFromPlaylist').addEventListener('click', _removeFromPlaylist);

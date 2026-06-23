@@ -57,7 +57,7 @@ export async function autoCastAndPlay(item, cleanName, cleanArtist) {
     const device = (savedUrl && devices.find(d => d.location === savedUrl)) || devices[0];
     store.castDevice = device;
     castState.skipAutoAdvance = true;
-    castState.transitioning = true;
+    markCastTransition(); // arms a 20s safety clear so a stuck transition can't block forever
     await apiJson('/api/dlna/cast', { method: 'POST', body: {
       device_id: device.id, name: cleanName, artist: cleanArtist,
       album: item.album || '', image: item.image || '', duration_ms: item.duration_ms || 0,

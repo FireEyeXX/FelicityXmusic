@@ -34,7 +34,7 @@ body.player-active .player-bar { display: flex; }
 .player-actions button { background: none; border: none; color: var(--text-muted); cursor: pointer; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 50%; transition: all var(--transition); }
 .player-actions button:hover { color: var(--text); background: rgba(255,255,255,.05); }
 .player-actions .player-vol-wrap { display: flex; align-items: center; gap: 4px; }
-.player-actions .player-vol { width: 80px; height: 4px; accent-color: var(--accent); cursor: pointer; }
+.player-actions .player-volume { width: 80px; height: 4px; accent-color: var(--accent); cursor: pointer; }
 /* ── Full Player ── */
 .full-player-backdrop { display: none; }
 .full-player {

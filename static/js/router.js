@@ -57,6 +57,12 @@ export function switchPage(page, fromPopstate) {
 // ── Search For (used by clickable elements) ──
 export function searchFor(query, type) {
   switchPage('search');
+  // switchPage no-ops if already on search; explicitly reset detail sub-views
+  // so an open artist/album/show detail doesn't cover the fresh results.
+  $('#showDetail').style.display = 'none';
+  if ($('#artistDetail')) $('#artistDetail').style.display = 'none';
+  if ($('#albumDetail')) $('#albumDetail').style.display = 'none';
+  $('#searchResults').style.display = '';
   $('#searchInput').value = query;
   $('#searchClear').style.display = 'block';
   store.searchType = type;
@@ -124,7 +130,7 @@ function handlePopstate(e) {
 
 // ── Keyboard shortcuts ──
 function handleKeydown(e) {
-  if (e.key === '/' && !$('#loginScreen').style.display !== 'none' && document.activeElement.tagName !== 'INPUT') {
+  if (e.key === '/' && $('#loginScreen').style.display === 'none' && document.activeElement.tagName !== 'INPUT') {
     e.preventDefault();
     switchPage('search');
     $('#searchInput').focus();

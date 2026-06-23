@@ -23,16 +23,22 @@ export function setPlayerRefs(refs) {
 
 import { fetchTrackBpm } from './bpm.js';
 
-let _bpmLoadTimer = null;
-let _bpmLoadAbort = null;
+// Per-panel lazy-load state. renderQueue() renders into up to 3 panels; a single
+// shared timer/abort would let each panel's call cancel the previous one, so only
+// the last-rendered panel ever got badges. Key the state per element.
+const _bpmLoadState = new WeakMap();
 /** Lazy-load BPM badges — limited to nearby tracks, with delays between requests. */
 async function _loadMissingBpm(el) {
-  clearTimeout(_bpmLoadTimer);
-  if (_bpmLoadAbort) _bpmLoadAbort.aborted = true;
+  const prev = _bpmLoadState.get(el);
+  if (prev) {
+    clearTimeout(prev.timer);
+    prev.abort.aborted = true;
+  }
   const abort = { aborted: false };
-  _bpmLoadAbort = abort;
+  const state = { timer: null, abort };
+  _bpmLoadState.set(el, state);
 
-  _bpmLoadTimer = setTimeout(async () => {
+  state.timer = setTimeout(async () => {
     // Only load BPM for tracks near current position (±10)
     const lo = Math.max(0, store.playerIndex - 5);
     const hi = Math.min(store.playerQueue.length - 1, store.playerIndex + 10);
@@ -153,10 +159,10 @@ export function renderQueueInto(el) {
 export function updateSaveButton() {
   const btn = $('#fpSaveQueue');
   if (!btn) return;
-  // Show the "Save as playlist" button whenever the active context is the
-  // ephemeral Up Next AND there is something to save.
-  const isUpNext = !!(store.playlistMode && store.playlistMode.name === 'Up Next');
-  const show = (isUpNext || !store.playlistMode) && store.playerQueue.length > 0;
+  // Only show the "Save as playlist" button when it will actually work: the
+  // click handler early-returns unless a playlist context is active, so tie
+  // visibility to the same state (a live playlistMode + something to save).
+  const show = !!store.playlistMode && store.playerQueue.length > 0;
   btn.style.display = show ? '' : 'none';
   btn.textContent = 'Save as playlist';
 }
@@ -259,15 +265,14 @@ function _moveQueueItem(from, to) {
   }
   renderQueue();
   saveQueueDebounced();
-  // Playlist mode: sync reorder to Navidrome playlist
+  // Playlist mode: sync reorder to Navidrome playlist. Use a name-based full-queue
+  // replace (same contract as upnext.js) so id-less tracks (Spotify/reco/yt-dlp)
+  // are preserved instead of being dropped by an id-filtered partial reorder.
   if (store.playlistMode) {
-    const songIds = store.playerQueue.map(t => t.id).filter(Boolean);
-    if (songIds.length) {
-      import('./api.js').then(m => m.apiJson(`/api/library/playlist/${store.playlistMode.id}/reorder`, {
-        method: 'PUT',
-        body: { song_ids: songIds },
-      })).catch(() => {});
-    }
+    const tracks = store.playerQueue.map(t => ({
+      name: t.name || '', artist: t.artist || '', album: t.album || '',
+    }));
+    import('./upnext.js').then(m => m.replaceByName(store.playlistMode.id, tracks)).catch(() => {});
   }
 }
 

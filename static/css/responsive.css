@@ -73,6 +73,8 @@
   .player-bar .player-img { width: 42px; height: 42px; }
   .card-play-btn { opacity: .85; transform: translateY(0); }
   .card-dl-btn { opacity: .85; transform: translateY(0); }
+  .card-radio-btn { opacity: .85; transform: translateY(0); }
+  .card-fav-btn { opacity: .85; }
   .queue-panel { height: 80vh; border-radius: 0 0 16px 16px; }
 
   .grid {

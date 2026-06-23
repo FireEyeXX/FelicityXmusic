@@ -148,6 +148,7 @@ async function loadRecs() {
   } catch {
     recsCache = [];
     renderRecs();
+    showToast("Couldn't load recommendations");
   } finally {
     recsLoading = false;
   }
@@ -270,7 +271,7 @@ export function playRecIndex(idx) {
 export function dismissRec(idx) {
   if (typeof idx !== 'number' || idx < 0 || idx >= recsCache.length) return;
   recsCache.splice(idx, 1);
-  if (recsPlayingIdx >= idx) recsPlayingIdx = Math.max(-1, recsPlayingIdx - 1);
+  if (recsPlayingIdx > idx) recsPlayingIdx--;
   renderRecs();
 }
 

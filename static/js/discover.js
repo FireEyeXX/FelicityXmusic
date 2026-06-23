@@ -4,7 +4,8 @@ import { store } from './store.js';
 import { $, $$, esc, historyBack } from './utils.js';
 import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
-import { renderResults, checkLibrary, cardPlayBtn, cardDlBtn, cardRadioBtn, cardFavBtn, cardSubHtml } from './search.js';
+import { renderResults, checkLibrary, addCardKebabs, cardPlayBtn, cardDlBtn, cardRadioBtn, cardFavBtn, cardSubHtml } from './search.js';
+import { wasLongPress } from './contextmenu.js';
 
 // Curated quick-access genre chips for zouk-family discovery.
 // Limited to Last.fm tags that actually return tracks (verified via API):
@@ -97,11 +98,13 @@ export async function loadTagResults(tag, type, append) {
       const newCards = Array.from(fragment.children);
       newCards.forEach(card => {
         card.addEventListener('click', (e) => {
+          if (wasLongPress()) return;
           if (e.target.closest('.clickable') || e.target.closest('.card-play-btn') || e.target.closest('.card-dl-btn') || e.target.closest('.card-radio-btn') || e.target.closest('.card-fav-btn')) return;
           openModal(JSON.parse(card.dataset.item));
         });
         grid.appendChild(card);
       });
+      addCardKebabs(newCards);
       checkLibrary(data.results, grid, newCards);
     }
     applyTagFilter();

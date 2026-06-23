@@ -30,6 +30,11 @@ export async function apiJson(url, opts = {}) {
     opts.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   }
   const res = await apiFetch(url, opts);
+  if (res.status === 204) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
   return res.json();
 }
 

@@ -64,6 +64,9 @@
   .card .like-btn {
     position: absolute; top: 8px; right: 8px; z-index: 4;
   }
+  /* When the "In Library" badge is present (top-right), shift the heart left
+     so it clears the badge instead of overlapping it. */
+  .card.in-library .like-btn { right: 84px; }
   /* In queue rows the heart sits inline, before the kebab. */
   .queue-item .like-btn:hover { background: rgba(255,255,255,.06); border-radius: 50%; }
   /* Library-detail cards: bottom-right is the play button, top-right is remove,

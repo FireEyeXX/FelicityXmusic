@@ -188,7 +188,7 @@ export function restoreSearch() {
       $('#searchInput').value = saved.q;
       $('#searchClear').style.display = 'block';
       store.searchType = saved.type || 'track';
-      $$('.type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === store.searchType));
+      $$('.type-btn[data-type]').forEach(b => b.classList.toggle('active', b.dataset.type === store.searchType));
       doSearch();
     }
   } catch {}
@@ -399,9 +399,9 @@ export function init() {
     renderRecentSearches();
   });
 
-  $$('.type-btn').forEach(btn => {
+  $$('.type-btn[data-type]').forEach(btn => {
     btn.addEventListener('click', () => {
-      $$('.type-btn').forEach(b => b.classList.remove('active'));
+      $$('.type-btn[data-type]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       store.searchType = btn.dataset.type;
       doSearch();

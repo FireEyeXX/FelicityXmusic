@@ -11,7 +11,7 @@ export async function startRadio(item) {
   const params = new URLSearchParams({
     track: item.name || '',
     artist: item.artist || '',
-    artist_id: item.id || store.currentArtistId || '',
+    artist_id: (item.type === 'artist' ? item.id : '') || store.currentArtistId || '',
   });
   showToast('Starting radio...');
   try {
@@ -100,18 +100,22 @@ export function init() {
     const img = $('#artistDetailImg').src;
     const btn = $('#followArtist');
     const isFollowing = store.favoritedArtistIds.has(store.currentArtistId);
-    if (isFollowing) {
-      await apiJson(`/api/favorites/${store.currentArtistId}`, { method: 'DELETE' });
-      store.favoritedArtistIds.delete(store.currentArtistId);
-      btn.innerHTML = '&#x2661; Follow';
-      btn.style.color = '';
-      showToast(`Unfollowed ${name}`);
-    } else {
-      await apiJson('/api/favorites', { method: 'POST', body: { artist_id: store.currentArtistId, name, image: img } });
-      store.favoritedArtistIds.add(store.currentArtistId);
-      btn.innerHTML = '&#x2665; Following';
-      btn.style.color = '#ef4444';
-      showToast(`Following ${name}`);
+    try {
+      if (isFollowing) {
+        await apiJson(`/api/favorites/${store.currentArtistId}`, { method: 'DELETE' });
+        store.favoritedArtistIds.delete(store.currentArtistId);
+        btn.innerHTML = '&#x2661; Follow';
+        btn.style.color = '';
+        showToast(`Unfollowed ${name}`);
+      } else {
+        await apiJson('/api/favorites', { method: 'POST', body: { artist_id: store.currentArtistId, name, image: img } });
+        store.favoritedArtistIds.add(store.currentArtistId);
+        btn.innerHTML = '&#x2665; Following';
+        btn.style.color = '#ef4444';
+        showToast(`Following ${name}`);
+      }
+    } catch (e) {
+      showToast('Failed: ' + e.message);
     }
   });
 }

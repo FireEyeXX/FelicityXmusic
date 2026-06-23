@@ -213,6 +213,10 @@ export function buildActionsFor(item, type, context = {}) {
   // ── Track-like items (track, queue-track, recommendation, episode) ──
   const isTracklike = (type === 'track' || type === 'queue-track' || type === 'recommendation' || type === 'episode' || it.type === 'track');
 
+  // "Add to playlist" vs "Add to Up Next": _addToQueue appends to the in-memory
+  // queue, which only persists as a real playlist when playlistMode is set.
+  const addLabel = store.playlistMode ? 'Add to playlist' : 'Add to Up Next';
+
   if (type === 'queue-track') {
     actions.push({
       label: 'Play now', icon: '&#9654;',
@@ -229,7 +233,7 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => import('./recommendations.js').then(m => m.playRecIndex && m.playRecIndex(context.recIndex)),
     });
     actions.push({
-      label: 'Add to playlist', icon: '+',
+      label: addLabel, icon: '+',
       onClick: () => _addToQueue([it]),
     });
     actions.push({
@@ -247,7 +251,7 @@ export function buildActionsFor(item, type, context = {}) {
       onClick: () => _playNext(it),
     });
     actions.push({
-      label: 'Add to playlist', icon: '+',
+      label: addLabel, icon: '+',
       onClick: () => _addToQueue([it]),
     });
     actions.push({
@@ -387,10 +391,9 @@ export function buildActionsFor(item, type, context = {}) {
 
 // ── Action implementations ────────────────────────────────────────
 function _addToQueue(items) {
-  getPlayerModule().then(m => {
-    m.addToQueue(items);
-    showToast(`Added ${items.length} to playlist`);
-  });
+  // No toast here — the player's addToQueue already shows its own confirmation
+  // (and a playlist-mode add toast), so emitting one here would double-toast.
+  getPlayerModule().then(m => m.addToQueue(items));
 }
 
 function _playNow(item) {
@@ -509,7 +512,7 @@ function _searchFor(searchType, q) {
   store.searchType = searchType;
   document.querySelectorAll('.type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === searchType));
   // Navigate to search page
-  import('./router.js').then(m => m.goPage && m.goPage('search'));
+  import('./router.js').then(m => m.switchPage && m.switchPage('search'));
   import('./search.js').then(m => m.doSearch && m.doSearch());
 }
 

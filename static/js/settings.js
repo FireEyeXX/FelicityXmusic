@@ -119,7 +119,10 @@ async function _loadDeviceSettings() {
     const engineEl = $('#settingPlayerEngine');
     if (engineEl) {
       engineEl.value = localStorage.getItem('ms_player_engine') || 'classic';
-      engineEl.addEventListener('change', () => _toggleDjSection());
+      if (!engineEl.dataset.bound) {
+        engineEl.dataset.bound = '1';
+        engineEl.addEventListener('change', () => _toggleDjSection());
+      }
     }
     _toggleDjSection();
     _loadDjSettings();
@@ -365,6 +368,7 @@ export async function loadDiskUsage() {
         try {
           await apiJson(`/api/admin/disk-usage/${encodeURIComponent(dirName)}`, { method: 'DELETE' });
           group.remove();
+          loadDiskUsage();
         } catch (e) { alert('Failed: ' + e.message); }
       });
     });

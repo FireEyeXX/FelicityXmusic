@@ -214,6 +214,8 @@ export function init() {
     const item = _currentItem();
     if (!item) return;
     e.stopPropagation();
+    // Close the full player first so the navigation target isn't hidden under the overlay.
+    if (store.fullPlayerOpen) closeFullPlayer();
     import('./contextmenu.js').then(m => {
       if (item.album) m.openAlbumByName(item.album);
       else if (item.artist) m.openArtistByName(item.artist);

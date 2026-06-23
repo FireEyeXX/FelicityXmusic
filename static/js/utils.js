@@ -36,13 +36,23 @@ export function formatSize(bytes) {
 }
 
 // ── Toast Notification ──
-export function showToast(msg) {
+export function showToast(msg, isError = false) {
   let toast = $('#toastMsg');
   if (!toast) {
     toast = document.createElement('div');
     toast.id = 'toastMsg';
-    toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg-elevated);color:var(--text);padding:10px 20px;border-radius:20px;font-size:13px;z-index:999;opacity:0;transition:opacity .3s;border:1px solid var(--border);';
+    toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:20px;font-size:13px;z-index:999;opacity:0;transition:opacity .3s;';
     document.body.appendChild(toast);
+  }
+  // Honor the error flag with a distinct (red) style; default is the neutral elevated style.
+  if (isError) {
+    toast.style.background = 'var(--error, #d33)';
+    toast.style.color = '#fff';
+    toast.style.border = '1px solid var(--error, #d33)';
+  } else {
+    toast.style.background = 'var(--bg-elevated)';
+    toast.style.color = 'var(--text)';
+    toast.style.border = '1px solid var(--border)';
   }
   toast.textContent = msg;
   toast.style.opacity = '1';
