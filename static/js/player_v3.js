@@ -281,10 +281,15 @@ function _startCrossfade(seekable = true) {
     if (!IS_WEBKIT && newDeck.playbackRate !== 1.0) {
       const startRate = newDeck.playbackRate;
       const diff = Math.abs(startRate - 1.0);
-      // Settle the new track to its true tempo QUICKLY (~3-6s, eased) so it doesn't play
-      // time-stretched + off-tempo under the dancer's feet for 15-30s. The beatmatch was
-      // for the transition overlap; once the new track is solo it should be at 1.0x fast.
-      const returnSec = Math.min(6, Math.max(3, Math.round(diff * 80)));
+      // Gradually return the new deck to 1.0x. A SLOW return is intentional — a fast snap
+      // is audible as a tempo jump. Default 15s floor / 400 s-per-unit (≈30s for ±8%).
+      // Tunable: ms_dj_rate_return_min (floor seconds), ms_dj_rate_return_scale (s/unit).
+      const _rrMin = parseFloat(_djSetting('rate_return_min', '15'));
+      const _rrScale = parseFloat(_djSetting('rate_return_scale', '400'));
+      const returnSec = Math.max(
+        Number.isFinite(_rrMin) ? _rrMin : 15,
+        Math.round(diff * (Number.isFinite(_rrScale) ? _rrScale : 400))
+      );
       const steps = Math.round(returnSec * 2); // 2 steps/sec
       let step = 0;
       _rateReturnTimer = setInterval(() => {
