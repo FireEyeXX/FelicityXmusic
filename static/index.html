@@ -66,9 +66,10 @@
   }
   /* In queue rows the heart sits inline, before the kebab. */
   .queue-item .like-btn:hover { background: rgba(255,255,255,.06); border-radius: 50%; }
-  /* Library-detail cards: remove (top-right) + kebab (mid-right) are taken, so
-     pin the heart to the bottom-right corner instead. */
-  #libraryTracks .card .like-btn { top: auto; bottom: 8px; right: 8px; }
+  /* Library-detail cards: bottom-right is the play button, top-right is remove,
+     mid-right is the kebab — so sit the heart on the mid-right edge just left of
+     the kebab (kebab is right:8, heart right:52), clear of play/remove/download. */
+  #libraryTracks .card .like-btn { top: 50%; bottom: auto; right: 52px; transform: translateY(-50%); }
   /* ── Recent searches (chips shown when the input is focused & empty) ── */
   .recent-searches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   .recent-chip {

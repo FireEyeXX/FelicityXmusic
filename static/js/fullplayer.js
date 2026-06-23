@@ -205,7 +205,10 @@ export function init() {
     const item = _currentItem();
     if (!item || !item.artist) return;
     e.stopPropagation();
-    import('./contextmenu.js').then(m => m.openArtistByName(item.artist));
+    // Throw the user into a Search for the artist (close the full player first so
+    // the search view isn't hidden under the overlay).
+    if (store.fullPlayerOpen) closeFullPlayer();
+    import('./router.js').then(m => m.searchFor(item.artist, 'artist'));
   };
   const _navAlbum = (e) => {
     const item = _currentItem();
