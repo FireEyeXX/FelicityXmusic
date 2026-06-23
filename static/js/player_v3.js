@@ -8,7 +8,7 @@ import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
 import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchUpcoming, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
-import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync } from './djmix.js';
+import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
 import { getDjData } from './bpm.js';
 import * as cast from './cast.js';
 
@@ -229,9 +229,10 @@ function _startCrossfade(seekable = true) {
   const beatDelay = (result.crossfadeStartTime - _ctx.currentTime) * 1000;
   const timerDur = dur * 1000 + Math.max(0, beatDelay) + 200;
 
-  // Start real-time beat drift correction during the crossfade overlap
+  // Start real-time beat drift correction during the crossfade overlap.
+  // WebKit path never stretches tempo, so there's nothing to phase-lock — skip the PLL.
   if (_beatSync) _beatSync.stop();
-  if (transOutData?.bpm && transInData?.bpm) {
+  if (!IS_WEBKIT && transOutData?.bpm && transInData?.bpm) {
     _beatSync = new CrossfadeBeatSync(
       _fadingOutDeck, _activeDeckEl(),
       transOutData.bpm, transInData.bpm, result.outRate, result.inRate
@@ -246,6 +247,11 @@ function _startCrossfade(seekable = true) {
   // outro_fade=off: quick 20ms fade to avoid pop, then stop
   if (!outroFade) {
     const desc = _deckDesc(deckToStop);
+    // Clear the outgoing fade scheduleDjTransitionV3 already scheduled before laying
+    // down our 20ms kill ramp — AudioParam events stack, so without this the two curves
+    // fight/yank the gain. cancelScheduledValues lets the 20ms ramp REPLACE the transition
+    // outgoing curve cleanly.
+    desc.gain.gain.cancelScheduledValues(_ctx.currentTime);
     desc.gain.gain.setValueAtTime(desc.gain.gain.value, _ctx.currentTime);
     desc.gain.gain.linearRampToValueAtTime(0, _ctx.currentTime + 0.02);
     setTimeout(() => { deckToStop.pause(); deckToStop.src = ''; }, 25);
@@ -259,10 +265,11 @@ function _startCrossfade(seekable = true) {
     _fadingOutDeck = null;
     _crossfading = false;
     resumePrefetch();
-    // Gradually return new deck playbackRate to 1.0 over ~10 seconds
+    // Gradually return new deck playbackRate to 1.0 over ~10 seconds.
+    // WebKit path never stretched tempo (rate stays 1) — nothing to return, skip.
     clearInterval(_rateReturnTimer); // Bug #4: clear previous
     const newDeck = _activeDeckEl();
-    if (newDeck.playbackRate !== 1.0) {
+    if (!IS_WEBKIT && newDeck.playbackRate !== 1.0) {
       const startRate = newDeck.playbackRate;
       const diff = Math.abs(startRate - 1.0);
       // Slower return for larger tempo differences: 30s for ±8%, 15s for ±2%
@@ -558,12 +565,31 @@ async function _loadAndPlayImpl() {
       // grid is available at fade time. _startCrossfade does _outDjData=_inDjData;
       // _inDjData=null synchronously, so an async fetchDjData().then() would not have
       // resolved yet → beat-sync silently disabled. Keep the async fetch as cache warmup.
-      const inData = getDjData(cleanName, cleanArtist);
-      if (inData) _inDjData = inData;
+      // M2: ALWAYS clear-then-set from the track being loaded so a stale _inDjData from a
+      // previously-predicted (different) track can't survive and feed the PLL the wrong
+      // beat grid (Android beat drift). The sync cache is the source of truth; the async
+      // fetch is only a warmup for a cache miss (and only fills if still unset).
+      _inDjData = getDjData(cleanName, cleanArtist) || null;
       if (!_inDjData) {
-        fetchDjData(cleanName, cleanArtist).then(d => { _inDjData = d; }).catch(() => {});
+        fetchDjData(cleanName, cleanArtist).then(d => { if (!_inDjData) _inDjData = d; }).catch(() => {});
       }
-      if (cached) {
+      if (cached && IS_WEBKIT) {
+        // Prefetch-HIGH (WebKit only): the incoming gain ramp must NOT start before the
+        // deck can render, or the fade-in plays silence (large FLAC decode on WebKit).
+        // Mirror the uncached structure: finalize any prior crossfade, load src on the
+        // INACTIVE deck, play(), bounded wait for canplay (blobs resolve near-instantly),
+        // THEN start the ramp. Android keeps its proven order in the branch below.
+        if (_crossfading && _fadingOutDeck) {
+          resetDeckAfterTransitionV3(_deckDesc(_fadingOutDeck));
+          _fadingOutDeck.pause(); _fadingOutDeck.src = ''; _fadingOutDeck = null;
+          _teardownCrossfade(); _crossfading = false;
+        }
+        const nextDeck = _inactiveDeckEl();
+        _setDeckSrc(nextDeck, src);
+        nextDeck.play().catch(() => {});
+        await _waitForCanPlay(nextDeck, 1500);
+        _startCrossfade(true); // cached blob = seekable — also swaps _activeDeck
+      } else if (cached) {
         // IMPORTANT: call _startCrossfade BEFORE setting src on the next deck.
         // _startCrossfade's rapid-skip handler clears _fadingOutDeck.src, and during
         // a rapid skip _fadingOutDeck IS the inactive deck we're about to load.
@@ -600,13 +626,21 @@ async function _loadAndPlayImpl() {
       _setDeckSrc(deck, getCachedUrl(cleanName, cleanArtist, item.id) || streamUrl);
       deck.play().catch(() => {});
       if (_activeGain()) {
-        // Short 18ms ramp to full instead of an instant set — avoids a gain click on
-        // cold start (matches the outro micro-ramp pattern used elsewhere).
         const g = _activeGain().gain;
-        const t0 = _ctx.currentTime;
-        g.cancelScheduledValues(t0);
-        g.setValueAtTime(g.value, t0);
-        g.linearRampToValueAtTime(1, t0 + 0.018);
+        // Start silent and fade in. CRITICAL for Safari/Mac: the AudioContext starts
+        // suspended and resume() is async, so scheduling the ramp against the still-frozen
+        // currentTime (0) makes it complete instantly on resume → an audible snap/stutter
+        // at the start of every track. Schedule the ramp only once the clock is live.
+        g.cancelScheduledValues(0);
+        g.value = 0;
+        const _rampIn = () => {
+          const t0 = _ctx.currentTime;
+          g.cancelScheduledValues(t0);
+          g.setValueAtTime(0, t0);
+          g.linearRampToValueAtTime(1, t0 + 0.05);
+        };
+        if (_ctx.state === 'suspended') _ctx.resume().then(_rampIn).catch(_rampIn);
+        else _rampIn();
       }
       // Fetch DJ data for current track (needed for crossfade timing)
       _outDjData = null;
@@ -768,7 +802,12 @@ export function nextTrack(opts = {}) {
       return;
     }
     _nextTrackInQueue();
-  }).catch(() => { _advanceInFlight = false; });
+  }).catch(() => {
+    // M4: released the latch without any advance (loadAndPlay never ran). Re-arm the
+    // auto-crossfade trigger or the current track would hard-cut at its end.
+    _advanceInFlight = false;
+    _crossfadeTriggered = false;
+  });
 }
 
 function _nextTrackInQueue() {
@@ -777,7 +816,10 @@ function _nextTrackInQueue() {
     do { next = Math.floor(Math.random() * store.playerQueue.length); } while (next === store.playerIndex);
     store.playerIndex = next;
     loadAndPlay();
-  } else if (store.playerIndex < store.playerQueue.length - 1) {
+  } else if (_djSetting('smart_queue', 'off') !== 'off' || store.playerIndex < store.playerQueue.length - 1) {
+    // HIGH-1: enter smart mode regardless of position when smart_queue is on, so the LAST
+    // index isn't a dead-end (pickSmartNext has a whole-queue/backward fallback to unplayed
+    // earlier tracks). When smart is off this guard reduces to the original forward check.
     // Smart Queue: pick best next track by BPM/key instead of sequential
     const smartMode = _djSetting('smart_queue', 'off');
     // Try cache if _outDjData wasn't set yet (async fetch didn't complete)
@@ -799,6 +841,10 @@ function _nextTrackInQueue() {
         if (cand && _smartKey(cand) === _predictedNextKey) smartIdx = _predictedNextIdx;
       }
       if (smartIdx == null) {
+        // Prediction rejected → recompute. Any _inDjData warmed for the predicted (now
+        // discarded) track is stale; clear it so loadAndPlay's fresh sync resolve from the
+        // ACTUALLY-chosen track is the sole source of truth (M2 — prevents beat drift).
+        _inDjData = null;
         smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       }
       _predictedNextIdx = null; _predictedNextKey = null; // consume the prediction
@@ -809,9 +855,25 @@ function _nextTrackInQueue() {
         return;
       }
     }
-    store.playerIndex++;
-    loadAndPlay();
-  } else if (store.repeatMode === 'all') {
+    // Smart returned null (or smart is off). If a forward track exists, advance
+    // sequentially as before. Otherwise (last index) fall through to the same
+    // repeat-all / radio / rec terminal handling the non-smart path uses.
+    if (store.playerIndex < store.playerQueue.length - 1) {
+      store.playerIndex++;
+      loadAndPlay();
+      return;
+    }
+    _nextTrackTerminal();
+  } else {
+    _nextTrackTerminal();
+  }
+}
+
+// Terminal advance handling when no forward/smart in-queue track is available:
+// repeat-all wrap, radio auto-fill, or virtual recommendations. Extracted so both the
+// non-smart last-index path and the smart-returned-null last-index path share it.
+function _nextTrackTerminal() {
+  if (store.repeatMode === 'all') {
     store.playerIndex = 0;
     loadAndPlay();
   } else if (store.radioMode && !store.radioLoading) {
@@ -839,15 +901,18 @@ function _nextTrackInQueue() {
           _activeDeckEl().pause();
           updatePlayPauseIcon(false);
           _advanceInFlight = false; // terminal, no loadAndPlay — release latch
+          _crossfadeTriggered = false; // M4: no advance occurred — re-arm trigger
         }
       }).catch(() => {
         showToast('Failed to load more tracks');
         _activeDeckEl().pause();
         updatePlayPauseIcon(false);
         _advanceInFlight = false; // terminal, no loadAndPlay — release latch
+        _crossfadeTriggered = false; // M4: no advance occurred — re-arm trigger
       }).finally(() => { store.radioLoading = false; });
     } else {
       _advanceInFlight = false; // no seed to fetch radio from — release latch
+      _crossfadeTriggered = false; // M4: no advance occurred — re-arm trigger
     }
   } else {
     // Queue ended — continue with virtual recommendations
@@ -1224,7 +1289,13 @@ export function init() {
         const remaining = effectiveEnd - deck.currentTime;
         // Calculate trigger point: use beat grid or fallback to fixed duration
         let triggerAt = _crossfadeDur();
-        if (_outDjData && _outDjData.beat_grid && _outDjData.bpm) {
+        if (IS_WEBKIT) {
+          // WebKit runs the simple crossfade whose length == webkitCrossfadeDuration.
+          // Lead time MUST equal that fade length, or the fade overruns/undershoots the
+          // track boundary (the beat-grid lead of ~11s but ≤10s fade caused a gap).
+          const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
+          triggerAt = webkitCrossfadeDuration(_outDjData?.bpm, numBeats);
+        } else if (_outDjData && _outDjData.beat_grid && _outDjData.bpm) {
           const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
           const startBeat = findCrossfadeStartBeat(_outDjData.beat_grid, effectiveEnd, numBeats);
           triggerAt = effectiveEnd - startBeat;
@@ -1234,7 +1305,8 @@ export function init() {
         if (remaining <= triggerAt && remaining > -5 && !_crossfadeTriggered
             && !_advanceInFlight && store.repeatMode !== 'one' && !store.castDevice
             && deck.currentTime > 10) { // don't trigger in first 10s
-          const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all';
+          const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all'
+            || _djSetting('smart_queue', 'off') !== 'off'; // smart mode can pick an unplayed earlier track
           if (hasNext) {
             _crossfadeTriggered = true;
             nextTrack({ reason: 'auto' });

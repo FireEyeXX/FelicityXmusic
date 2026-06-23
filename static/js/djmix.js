@@ -17,6 +17,16 @@ import { getDjData, fetchTrackBpm } from './bpm.js';
 /** Re-export fetchTrackBpm as fetchDjData for player_v2.js compatibility */
 export { fetchTrackBpm as fetchDjData };
 
+/**
+ * WebKit (macOS Safari / WKWebView / Tauri) detection.
+ * WebKit snaps multi-segment AudioParam ramps to the end value and re-buffers
+ * <audio> on frequent playbackRate writes, so the rich DJ transition breaks there.
+ * WKWebView/Safari report a Safari-like UA without "Chrome"; Android WebView/Chrome
+ * include "Chrome"/"Android" and are excluded (they keep the rich path).
+ */
+export const IS_WEBKIT = typeof navigator !== 'undefined' &&
+  /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|CriOS|Android/.test(navigator.userAgent);
+
 /* ------------------------------------------------------------------ */
 /*  Camelot Wheel                                                      */
 /* ------------------------------------------------------------------ */
@@ -83,6 +93,18 @@ function parseCamelot(code) {
  * @param {string} inCamelot  - Camelot code of incoming track
  * @returns {'blend'|'bass_swap'|'cut'}
  */
+/**
+ * WebKit simple-crossfade duration (seconds). Beat-based at rate=1, clamped to an
+ * audible range. Shared so player_v3's auto-crossfade trigger lead time matches the
+ * actual WebKit fade length (otherwise the fade starts ~11s early but lasts ≤10s).
+ * @param {number} outBpm - outgoing track BPM (defaults to 85 if falsy)
+ * @param {number} [numBeats=16] - beats to fade over
+ * @returns {number}
+ */
+export function webkitCrossfadeDuration(outBpm, numBeats = 16) {
+  return Math.max(3, Math.min(10, numBeats * (60 / (outBpm || 85))));
+}
+
 export function getTransitionStyle(outCamelot, inCamelot) {
   const a = parseCamelot(outCamelot);
   const b = parseCamelot(inCamelot);
@@ -372,6 +394,15 @@ export function scheduleDjTransition(ctx, outDeck, inDeck, outData, inData, opts
 // set stays correct when the queue is reordered or edited mid-set.
 const _playedKeys = new Set();
 
+// ── Per-set selection state ──
+// All WRITTEN only in markPlayed()/resetSmartQueuePlayed() (real advances / set start),
+// and READ (never mutated) in pickSmartNext(). This keeps pickSmartNext side-effect-free
+// and keeps every value stable between a prediction call and its matching commit call.
+let _setStartBpm = null;      // BPM of the first track marked in the current smart set
+let _playedCount = 0;         // number of real advances in the current set (tempo-arc clock)
+let _setSalt = 0;             // per-set jitter salt: constant within a set, varies across sets
+const _recentArtists = [];    // ring buffer of last N distinct artists (recency diversity)
+
 /**
  * Stable identity key for a queue item.
  * Prefers a track id; falls back to a lowercased artist:name pair
@@ -385,7 +416,21 @@ function _trackKey(item) {
     : ((item.artist || '') + ':' + (item.name || '')).toLowerCase();
 }
 
-/** Reset played tracking (call when queue changes or playback restarts) */
+/**
+ * Decode HTML entities the same way bpm.js's internal _dec does (textarea-based,
+ * short-circuiting when there's no '&'). bpm.js does NOT export its decoder, so this
+ * mirror keeps getDjData lookups in pickSmartNext aligned with how bpm.js's _key
+ * normalizes cache keys (decode → lowercase → trim). Falls back to the raw string
+ * when no DOM is available (e.g. non-browser test).
+ */
+function _djDecode(s) {
+  if (!s || !s.includes('&')) return s;
+  if (typeof document === 'undefined') return s;
+  const e = document.createElement('textarea');
+  e.innerHTML = s;
+  return e.value;
+}
+
 /** Stable non-negative hash of a string (djb2) — used for deterministic per-track jitter. */
 function _keyHash(s) {
   let h = 5381;
@@ -393,10 +438,62 @@ function _keyHash(s) {
   return Math.abs(h);
 }
 
-export function resetSmartQueuePlayed() { _playedKeys.clear(); }
+/**
+ * Read a DJ setting the same way player_v3's _djSetting does (localStorage, `ms_dj_`
+ * prefix), returning `def` when unset or when no DOM/localStorage is available (tests).
+ * Numeric callers parse the result themselves.
+ */
+function _djSetting(key, def) {
+  try {
+    if (typeof localStorage === 'undefined') return def;
+    const v = localStorage.getItem('ms_dj_' + key);
+    return v == null ? def : v;
+  } catch { return def; }
+}
 
-/** Mark a queue item as played (pass the item, not an index) */
-export function markPlayed(item) { if (item) _playedKeys.add(_trackKey(item)); }
+/** Normalized artist for the recency ring (lowercased/trimmed, entity-decoded). */
+function _artistKey(item) {
+  return _djDecode((item && item.artist) || '').toLowerCase().trim();
+}
+
+/** Reset played + per-set selection state (call when queue changes or playback restarts) */
+export function resetSmartQueuePlayed() {
+  _playedKeys.clear();
+  _setStartBpm = null;
+  _playedCount = 0;
+  // Vary the jitter salt per set so each set explores a different deterministic ordering,
+  // while staying CONSTANT within a set (predict==commit). resetSmartQueuePlayed runs once
+  // per set, so capturing a varying value here is safe.
+  _setSalt = (_setSalt | 0) + 1;
+  _recentArtists.length = 0;
+}
+
+/**
+ * Mark a queue item as played (pass the item, not an index). Called once per REAL advance
+ * with the OUTGOING track — this is where all per-set selection state is written.
+ */
+export function markPlayed(item) {
+  if (!item) return;
+  _playedKeys.add(_trackKey(item));
+
+  // Capture the set's starting BPM from the first marked track's DJ data (if known),
+  // anchoring the tempo arc. Falls back silently when DJ data isn't cached yet.
+  if (_setStartBpm == null) {
+    const d = getDjData(_djDecode(item.name), _djDecode(item.artist));
+    if (d && d.bpm) _setStartBpm = d.bpm;
+  }
+  _playedCount++;
+
+  // Maintain a ring of the last N DISTINCT artists for recency diversity.
+  const a = _artistKey(item);
+  if (a) {
+    const existing = _recentArtists.indexOf(a);
+    if (existing !== -1) _recentArtists.splice(existing, 1);
+    _recentArtists.push(a);
+    const win = Math.max(0, parseInt(_djSetting('dj_artist_window', '3'), 10) || 0);
+    while (_recentArtists.length > win) _recentArtists.shift();
+  }
+}
 
 // NOTE: side-effect-free — does NOT mutate _playedKeys, so it is safe to call for
 // prediction (prefetch) and again at commit without desyncing played-state. The caller
@@ -406,27 +503,65 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
 
   // ---- Scoring tunables (BPM-equivalent units) ----
   const TRUST_FLOOR = 0.5;   // below this confidence, treat candidate BPM as UNKNOWN
-  const BAND = 8;            // preferred tempo window (BPM) around the target
-  const RAMP = 0;           // soft tempo target offset: target = curBpm + RAMP (gentle for zouk)
+  const BAND = parseFloat(_djSetting('dj_tempo_band', '8')) || 8; // preferred tempo window
   const CONF_PENALTY = 8;   // BPM-equiv cost for full uncertainty: (1 - conf) * CONF_PENALTY
-  const JITTER = 1.5;       // small random tie-break (BPM-equiv) so the set isn't deterministic
+  const JITTER = 1.5;       // small deterministic tie-break (BPM-equiv) so the set has variety
+
+  // Tunable enhancement weights (default ON with musical values).
+  const RAMP_PER_TRACK = parseFloat(_djSetting('dj_tempo_ramp', '1')); // BPM/track; 0 = flat
+  const MAX_RAMP_UP    = parseFloat(_djSetting('dj_tempo_peak', '12')); // max BPM above start
+  const _kw = parseFloat(_djSetting('dj_key_weight', '6'));
+  const KEY_WEIGHT     = Number.isFinite(_kw) ? _kw : 6;  // blend bonus (bpm_key); NaN-safe
+  const _ad = parseFloat(_djSetting('dj_artist_diversity', '6'));
+  const ARTIST_DIVERSITY = Number.isFinite(_ad) ? _ad : 6; // 0 disables; NaN→default
 
   const curBpm = currentDjData.bpm;
   const curCamelot = currentDjData.camelot;
-  const target = curBpm + RAMP;
+
+  // E. Per-set jitter salt. _setSalt is fixed for the whole set (set in resetSmartQueuePlayed),
+  // so jitter is identical across predict/commit WITHIN a set, but each new set reshuffles
+  // the tie-break ordering. XOR-mixing a well-distributed hash of the salt (rather than string-
+  // concatenating it) makes the salt actually move which near-tied track wins, even for short
+  // keys. _saltHash is a pure function of _setSalt → deterministic.
+  const _saltHash = _keyHash('s:' + (_setSalt | 0));
+  const _jitterFor = (key) => (Math.abs(_keyHash(key) ^ _saltHash) % 1000) / 1000 * JITTER;
+
+  // ---- A. Tempo energy arc (warm-up → plateau) ----
+  // target = setStart + min(playedCount * ramp, peak). Builds over the first ~N tracks,
+  // then holds near the peak (NOT a runaway monotonic speed-up). Both _setStartBpm and
+  // _playedCount are written ONLY in markPlayed (real advance), so they are identical
+  // between a prediction call and its matching commit call → predict==commit holds.
+  const ramp = Number.isFinite(RAMP_PER_TRACK) ? RAMP_PER_TRACK : 1;
+  const peak = Number.isFinite(MAX_RAMP_UP) ? MAX_RAMP_UP : 12;
+  // ramp=0 → flat arc anchored at the set's start BPM (NOT curBpm — that would re-anchor
+  // to every track and lose the "stay near where we started" intent).
+  const target = (_setStartBpm != null)
+    ? _setStartBpm + Math.min(_playedCount * ramp, peak)
+    : curBpm;
 
   // Distinct number of track keys in the queue (duplicates collapse).
   const distinctKeys = new Set(queue.map(_trackKey));
   const allPlayed = _playedKeys.size >= distinctKeys.size;
 
-  /** Key-bonus (subtracted from score) for harmonic compatibility. */
+  /**
+   * Harmonic key bonus (subtracted from score) for bpm_key mode. blend = full weight,
+   * bass_swap = half. Returns 0 outside bpm_key or when camelot data is missing.
+   */
   const keyBonus = (data) => {
     if (mode === 'bpm_key' && curCamelot && data.camelot) {
       const style = getTransitionStyle(curCamelot, data.camelot);
-      if (style === 'blend') return 3;
-      if (style === 'bass_swap') return 1;
+      if (style === 'blend') return KEY_WEIGHT;
+      if (style === 'bass_swap') return KEY_WEIGHT / 2;
     }
     return 0;
+  };
+
+  // C. Recent-artist diversity: soft penalty for candidates whose artist is in the ring.
+  // _recentArtists is only mutated in markPlayed, so it's stable across predict/commit.
+  const artistPenalty = (item) => {
+    if (!ARTIST_DIVERSITY) return 0;
+    const a = _artistKey(item);
+    return (a && _recentArtists.indexOf(a) !== -1) ? ARTIST_DIVERSITY : 0;
   };
 
   // Collect eligible trusted candidates, tracking in-band membership.
@@ -440,7 +575,9 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // Skip already-played tracks, unless repeat=all and EVERYTHING has been played.
     if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
 
-    const data = getDjData(item.name, item.artist);
+    // Decode entities before lookup so a title/artist with an HTML entity resolves
+    // its DJ data (bpm.js keys the cache under entity-decoded values via _key).
+    const data = getDjData(_djDecode(item.name), _djDecode(item.artist));
     if (!data || !data.bpm) { untrustedPool = true; continue; }
 
     const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
@@ -449,11 +586,13 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // Deterministic per-track jitter (NOT Math.random): pickSmartNext runs once at
     // prediction time (to prefetch) and again at commit; a re-rolled random term would
     // let the two diverge → wrong track prefetched / stale _inDjData. A stable hash of
-    // the track key gives variety across tracks while staying identical across calls.
-    const jitter = (_keyHash(key) % 1000) / 1000 * JITTER;
+    // the track key (salted per-set so each set differs) gives variety while staying
+    // identical across calls WITHIN a set (the salt is fixed for the set).
+    const jitter = _jitterFor(key);
     const score = Math.abs(data.bpm - target)
       + (1 - conf) * CONF_PENALTY
       - keyBonus(data)
+      + artistPenalty(item)
       + jitter;
     const inBand = Math.abs(data.bpm - target) <= BAND;
     trusted.push({ idx: i, score, inBand });
@@ -461,6 +600,11 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
 
   if (trusted.length) {
     // Prefer in-band trusted candidates; if none, consider all trusted.
+    // B. Harmonic weighting is folded into `score` via keyBonus (KEY_WEIGHT BPM of pull for
+    // a blend, half for bass_swap), so a key-compatible in-band track already out-scores a
+    // key-clashing one within ~KEY_WEIGHT BPM of tempo — without letting key override a large
+    // tempo gap (keyBonus is bounded). Final pick is the strict score minimum, which keeps the
+    // per-set jitter (E) effective for breaking genuine ties.
     const inBand = trusted.filter(c => c.inBand);
     const pool = inBand.length ? inBand : trusted;
     let best = pool[0];
@@ -481,26 +625,34 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     return pickSmartNext(queue, currentIndex, currentDjData, mode, repeatAll);
   }
 
-  // Whole-queue fallback: any unplayed track anywhere (not forward-only), so the set
-  // doesn't dead-end while earlier tracks remain unplayed. Prefer ones with trusted
-  // in-band BPM if available, else first unplayed.
-  let fallbackIdx = null;
-  let fallbackInBandIdx = null;
+  // D. Graceful low-confidence fallback. Instead of "first unplayed in array order", score
+  // ALL unplayed candidates by RAW BPM distance to target using whatever BPM is cached
+  // (even confidence 0.3), with a HEAVIER uncertainty penalty than the trusted pool — so
+  // even low-confidence tracks stay near-tempo. A 0.3-conf near-target track beats a random
+  // far-tempo one. Final fallback to first-unplayed when NO candidate has any cached BPM.
+  const LOW_CONF_PENALTY = CONF_PENALTY * 2; // heavier uncertainty cost in the loose pool
+  let firstUnplayedIdx = null;
+  let bestLowIdx = null;
+  let bestLowScore = Infinity;
   for (let i = 0; i < queue.length; i++) {
     if (i === currentIndex) continue;
     const item = queue[i];
     const key = _trackKey(item);
     if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
-    if (fallbackIdx == null) fallbackIdx = i;
-    if (fallbackInBandIdx == null) {
-      const data = getDjData(item.name, item.artist);
-      if (data && data.bpm) {
-        const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
-        if (conf >= TRUST_FLOOR && Math.abs(data.bpm - target) <= BAND) fallbackInBandIdx = i;
-      }
-    }
+    if (firstUnplayedIdx == null) firstUnplayedIdx = i;
+
+    const data = getDjData(_djDecode(item.name), _djDecode(item.artist));
+    if (!data || !data.bpm) continue; // no cached BPM at all → not scoreable here
+    const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
+    const jitter = _jitterFor(key);
+    const score = Math.abs(data.bpm - target)
+      + (1 - conf) * LOW_CONF_PENALTY
+      - keyBonus(data)
+      + artistPenalty(item)
+      + jitter;
+    if (score < bestLowScore) { bestLowScore = score; bestLowIdx = i; }
   }
-  return fallbackInBandIdx != null ? fallbackInBandIdx : fallbackIdx;
+  return bestLowIdx != null ? bestLowIdx : firstUnplayedIdx;
 }
 
 /**
@@ -524,6 +676,59 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
   const outBpm = outData?.bpm || 85;
   const inBpm = inData?.bpm || outBpm;
   const outCurrentTime = outDeck.element.currentTime;
+
+  /* ---- WebKit-only simple crossfade path ----
+   * WebKit snaps multi-segment AudioParam ramps and stutters on playbackRate
+   * changes, so the rich transition below produces a hard cut + stutter. On
+   * WebKit we run a minimal, reliable gain crossfade (no tempo stretch, no EQ
+   * automation, no filter sweep, no PLL) and return early with the same shape. */
+  if (IS_WEBKIT) {
+    // No tempo stretch — force rate 1 on both decks (no rAF ramp, no PLL).
+    outDeck.element.playbackRate = 1;
+    inDeck.element.playbackRate = 1;
+    outDeck.element.preservesPitch = true;
+    inDeck.element.preservesPitch = true;
+
+    // Beat-based duration at rate=1, else fallback; clamp to an audible range.
+    // Uses the shared webkitCrossfadeDuration helper so player_v3's trigger lead
+    // time matches this fade length exactly.
+    const wkFallbackSec = opts.fallbackSec || 5;
+    const wkDuration = outData?.bpm
+      ? webkitCrossfadeDuration(outBpm, numBeats)
+      : Math.max(3, Math.min(10, wkFallbackSec));
+
+    // Neutralize EQ + sweep on both decks so leftover kills don't color the sound.
+    for (const d of [outDeck, inDeck]) {
+      for (const f of [d.lowFilter, d.midFilter, d.highFilter]) {
+        if (f) { f.gain.cancelScheduledValues(now); f.gain.value = 0; }
+      }
+      if (d.sweepFilter) {
+        d.sweepFilter.frequency.cancelScheduledValues(now);
+        d.sweepFilter.Q.cancelScheduledValues(now);
+        d.sweepFilter.type = 'highpass';
+        d.sweepFilter.frequency.value = 20;
+        d.sweepFilter.Q.value = 0.7;
+      }
+    }
+
+    // Single-ramp linear gain crossfade (2 events per param — WebKit-reliable).
+    const t = now;
+    inDeck.gain.gain.cancelScheduledValues(t);
+    inDeck.gain.gain.setValueAtTime(0.0001, t);
+    inDeck.gain.gain.linearRampToValueAtTime(1, t + wkDuration);
+    outDeck.gain.gain.cancelScheduledValues(t);
+    outDeck.gain.gain.setValueAtTime(Math.max(0.0001, outDeck.gain.gain.value), t);
+    outDeck.gain.gain.linearRampToValueAtTime(0, t + wkDuration);
+
+    return {
+      crossfadeStartTime: t,
+      duration: wkDuration,
+      outRate: 1,
+      inRate: 1,
+      style: 'webkit-simple',
+      _tempoRamp: { id: null, cancelled: true },
+    };
+  }
 
   /* ---- 1. Dual tempo match (gradual ramp on outgoing deck) ---- */
   const midBpm = (outBpm + inBpm) / 2;
