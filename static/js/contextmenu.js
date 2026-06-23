@@ -362,9 +362,17 @@ export function buildActionsFor(item, type, context = {}) {
   if (type === 'queue-track' && typeof context.queueIndex === 'number') {
     actions.push({ divider: true });
     actions.push({
-      label: 'Remove from playlist', icon: '&times;', danger: true,
+      label: 'Remove from queue', icon: '&times;', danger: true,
       onClick: () => _removeFromQueue(context.queueIndex),
     });
+    // When the queue is backed by a real (named) Navidrome playlist, also offer
+    // removing the track from that playlist (not just the in-memory queue).
+    if (store.playlistMode && store.playlistMode.name !== 'Up Next') {
+      actions.push({
+        label: 'Remove from playlist', icon: '&times;', danger: true,
+        onClick: () => _removeFromQueue(context.queueIndex, true),
+      });
+    }
   }
   if (type === 'recommendation' && typeof context.recIndex === 'number') {
     actions.push({ divider: true });
@@ -422,8 +430,9 @@ function _moveQueueAfterCurrent(idx) {
   getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
 }
 
-function _removeFromQueue(idx) {
+function _removeFromQueue(idx, fromPlaylist) {
   if (typeof idx !== 'number' || idx < 0 || idx >= store.playerQueue.length) return;
+  const removed = store.playerQueue[idx];
   store.playerQueue.splice(idx, 1);
   if (idx < store.playerIndex) store.playerIndex--;
   else if (idx === store.playerIndex) {
@@ -437,6 +446,13 @@ function _removeFromQueue(idx) {
   }
   import('./queue.js').then(m => m.renderQueue());
   getPlayerModule().then(m => m.saveQueueDebounced && m.saveQueueDebounced());
+  // "Remove from playlist": also drop it from the backing Navidrome playlist
+  // (mirrors the queue row's ✕ button when in playlist mode).
+  if (fromPlaylist && store.playlistMode && removed) {
+    import('./api.js').then(m => m.apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
+      method: 'POST', body: { name: removed.name || '', artist: removed.artist || '' },
+    })).catch(() => {});
+  }
 }
 
 async function _fetchAlbumTracks(album) {
