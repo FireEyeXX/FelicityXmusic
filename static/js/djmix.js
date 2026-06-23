@@ -835,10 +835,14 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
   if (forceStyle === 'auto') {
     if (!outData?.camelot || !inData?.camelot) style = 'blend';
     else {
+      // Compatible keys → full equal-power, beat-matched BLEND (both decks play full,
+      // beats locked together). The old eq_swap/filter_sweep spectrally SUPPRESS each
+      // deck (kill the incoming bass/mids until a mid-point swap), which sounds thin/
+      // "both muted until the switch" rather than a real blend. Only clashing keys fall
+      // back to a quick cut. Force a specific technique via ms_dj_transition_style
+      // (auto | blend | eq_swap | filter_sweep | drop_cut).
       const compat = getTransitionStyle(outData.camelot, inData.camelot);
-      if (compat === 'blend') style = 'eq_swap';
-      else if (compat === 'bass_swap') style = 'filter_sweep';
-      else style = 'drop_cut';
+      style = (compat === 'cut') ? 'drop_cut' : 'blend';
     }
   }
 

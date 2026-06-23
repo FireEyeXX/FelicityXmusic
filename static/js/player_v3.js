@@ -22,6 +22,7 @@ document.body.appendChild(_deckB);
 let _ctx = null;
 let _nodesA = null, _nodesB = null;
 let _sourceA = null, _sourceB = null;
+let _master = null; // master safety limiter on the summed deck bus (prevents crossfade clipping)
 let _activeDeck = 'A';
 let _crossfading = false;
 let _crossfadeTimer = null;
@@ -111,9 +112,22 @@ function _ensureAudioContext() {
   _sourceA = _ctx.createMediaElementSource(_deckA);
   _sourceB = _ctx.createMediaElementSource(_deckB);
 
-  // Chain: source → low → mid → high → sweep → gain → destination
-  _sourceA.connect(_nodesA.low).connect(_nodesA.mid).connect(_nodesA.high).connect(_nodesA.sweep).connect(_nodesA.gain).connect(_ctx.destination);
-  _sourceB.connect(_nodesB.low).connect(_nodesB.mid).connect(_nodesB.high).connect(_nodesB.sweep).connect(_nodesB.gain).connect(_ctx.destination);
+  // Master safety limiter on the summed bus. A full equal-power BLEND sums two correlated
+  // basslines (0.707 + 0.707 ≈ 1.41 > 1.0) which would hard-clip the destination → audible
+  // crackle/pops during transitions. A brickwall limiter just below 0 dBFS catches that
+  // transient overshoot; normal single-track playback sits ≤ 0 dBFS (below threshold) so it
+  // passes through transparently. Both decks share it → equal latency, no beat misalignment.
+  _master = _ctx.createDynamicsCompressor();
+  _master.threshold.value = -0.5; // dBFS — only catches the cross-fade sum overshoot
+  _master.knee.value = 0;         // hard knee = brickwall limiting, transparent below thresh
+  _master.ratio.value = 20;
+  _master.attack.value = 0.002;
+  _master.release.value = 0.06;
+  _master.connect(_ctx.destination);
+
+  // Chain: source → low → mid → high → sweep → gain → master(limiter) → destination
+  _sourceA.connect(_nodesA.low).connect(_nodesA.mid).connect(_nodesA.high).connect(_nodesA.sweep).connect(_nodesA.gain).connect(_master);
+  _sourceB.connect(_nodesB.low).connect(_nodesB.mid).connect(_nodesB.high).connect(_nodesB.sweep).connect(_nodesB.gain).connect(_master);
 
   _nodesA.gain.gain.value = 1;
   _nodesB.gain.gain.value = 0;
