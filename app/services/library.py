@@ -384,13 +384,21 @@ async def update_playlist(playlist_id: str, song_ids_to_add: list[str] | None = 
         return sr.get("status") == "ok"
 
 
-async def remove_track_by_name(playlist_id: str, name: str, artist: str) -> bool:
-    """Remove a track from a playlist by matching name/artist. Finds the index in the playlist and removes it."""
+async def remove_track_by_name(playlist_id: str, name: str, artist: str, index: int | None = None) -> bool:
+    """Remove a track from a playlist by matching name/artist. When an explicit
+    index is given and the track at that index still matches, that EXACT row is
+    removed (duplicate-safe); otherwise falls back to the first name/artist match."""
     pl = await get_playlist(playlist_id)
     if not pl:
         return False
-    # Find matching track index
-    for i, track in enumerate(pl["tracks"]):
+    tracks = pl["tracks"]
+    # Prefer the exact clicked index when it still matches (handles duplicate songs)
+    if index is not None and 0 <= index < len(tracks):
+        t = tracks[index]
+        if _matches(t.get("name", ""), name) and _artist_matches(t.get("artist", ""), artist):
+            return await update_playlist(playlist_id, song_indices_to_remove=[index])
+    # Fallback: first matching track index
+    for i, track in enumerate(tracks):
         if _matches(track.get("name", ""), name) and _artist_matches(track.get("artist", ""), artist):
             return await update_playlist(playlist_id, song_indices_to_remove=[i])
     return False

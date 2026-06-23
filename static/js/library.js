@@ -704,11 +704,14 @@ export function init() {
     const name = await showInputModal('Duplicate playlist as', currentLibPlaylistName + ' (copy)', { okLabel: 'Duplicate' });
     if (!name) return;
     try {
-      // Create new playlist
-      await apiJson('/api/library/playlist', { method: 'POST', body: { name } });
-      // Find new playlist ID
-      const data = await apiJson('/api/library/playlists');
-      const pl = (data.playlists || []).find(p => p.name === name);
+      // Create new playlist — the endpoint returns the new id directly (no racy name-match)
+      const created = await apiJson('/api/library/playlist', { method: 'POST', body: { name } });
+      let pl = created && created.id ? { id: created.id, name } : null;
+      if (!pl) {
+        // Fallback for older backends that didn't return an id
+        const data = await apiJson('/api/library/playlists');
+        pl = (data.playlists || []).find(p => p.name === name);
+      }
       if (!pl) throw new Error('Playlist not created');
       // Add all tracks
       const songIds = currentLibPlaylistTracks.map(t => t.id).filter(Boolean);

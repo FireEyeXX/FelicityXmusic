@@ -136,10 +136,10 @@ async def get_playlist(playlist_id: str, user: dict = Depends(auth.get_current_u
 
 @router.post("/playlist")
 async def create_playlist(req: CreatePlaylistRequest, user: dict = Depends(auth.get_current_user)):
-    ok = await library.create_playlist(req.name, [])
-    if not ok:
+    new_id = await library.create_playlist_and_get_id(req.name)
+    if not new_id:
         raise HTTPException(500, "Failed to create playlist")
-    return {"status": "created"}
+    return {"status": "created", "id": new_id}
 
 
 @router.put("/playlist/{playlist_id}/tracks")
@@ -189,8 +189,8 @@ async def reorder_playlist(playlist_id: str, req: AddTracksByIdRequest, user: di
 
 @router.post("/playlist/{playlist_id}/remove-by-name")
 async def remove_track_by_name(playlist_id: str, req: AddTrackByNameRequest, user: dict = Depends(auth.get_current_user)):
-    """Remove a track from playlist by name/artist match."""
-    ok = await library.remove_track_by_name(playlist_id, req.name, req.artist)
+    """Remove a track from playlist by name/artist match (exact index when given)."""
+    ok = await library.remove_track_by_name(playlist_id, req.name, req.artist, req.index)
     if not ok:
         raise HTTPException(404, "Track not found in playlist")
     return {"status": "removed"}

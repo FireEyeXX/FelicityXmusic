@@ -633,7 +633,7 @@ export function init() {
       const cleanName = _decodeEntities(item.name || '');
       const cleanArtist = _decodeEntities(item.artist || '');
       await apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
-        method: 'POST', body: { name: cleanName, artist: cleanArtist },
+        method: 'POST', body: { name: cleanName, artist: cleanArtist, index: idx },
       });
       showToast(`Removed from ${store.playlistMode.name}`);
       // Mirror the backend removal in the local queue / now-playing UI.

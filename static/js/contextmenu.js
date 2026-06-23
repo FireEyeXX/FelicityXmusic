@@ -453,7 +453,7 @@ function _removeFromQueue(idx, fromPlaylist) {
   // (mirrors the queue row's ✕ button when in playlist mode).
   if (fromPlaylist && store.playlistMode && removed) {
     import('./api.js').then(m => m.apiJson(`/api/library/playlist/${store.playlistMode.id}/remove-by-name`, {
-      method: 'POST', body: { name: removed.name || '', artist: removed.artist || '' },
+      method: 'POST', body: { name: removed.name || '', artist: removed.artist || '', index: idx },
     })).catch(() => {});
   }
 }

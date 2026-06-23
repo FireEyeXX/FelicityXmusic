@@ -110,6 +110,7 @@ class AddTrackByNameRequest(BaseModel):
     name: str
     artist: str = ""
     album: str = ""
+    index: int | None = None  # optional exact row index to remove (duplicate-safe)
 
 
 class DeleteAlbumRequest(BaseModel):
