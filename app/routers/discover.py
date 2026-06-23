@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.models import ResolveRequest
-from app.services import auth, lastfm, search_providers, settings as app_settings, radio
+from app.services import auth, lastfm, library, search_providers, settings as app_settings, radio
 
 router = APIRouter(prefix="/api", tags=["discover"])
 
@@ -23,16 +23,45 @@ async def discover_tag(
     type: str = Query("track", pattern="^(track|album|artist|playlist)$"),
     limit: int = Query(20, ge=1, le=50),
     page: int = Query(1, ge=1),
+    novelty: str = Query("", pattern="^(new|library|)$"),
+    depth: str = Query("", pattern="^(deep|popular|)$"),
     user: dict = Depends(auth.get_current_user),
 ):
     if not lastfm.LASTFM_API_KEY:
         raise HTTPException(503, "Last.fm API key not configured")
+
+    # depth=deep: skip past the most-popular page to surface lesser-known tracks.
+    # Last.fm tag.getTopTracks is relevance-ordered; paging deeper is the reliable
+    # way to reach deeper cuts (per-track listener counts are not consistently returned).
+    fetch_page = page
+    if depth == "deep" and type == "track":
+        fetch_page = page + 2
+
     if type == "track":
-        results = await lastfm.get_tag_tracks(tag_name, limit, page)
+        results = await lastfm.get_tag_tracks(tag_name, limit, fetch_page)
+        # If any listener counts came through, refine ordering within the page.
+        if depth == "deep" and any(r.get("listeners") for r in results):
+            results.sort(key=lambda r: r.get("listeners") or 0)
+        elif depth == "popular" and any(r.get("listeners") for r in results):
+            results.sort(key=lambda r: r.get("listeners") or 0, reverse=True)
     elif type == "album":
         results = await lastfm.get_tag_albums(tag_name, limit, page)
     else:
         results = await lastfm.get_tag_artists(tag_name, limit, page)
+
+    # novelty filter: keep only new (not in library) or only owned tracks.
+    # Degrades to no-filter if the library is unavailable / check fails.
+    if novelty and results and type in ("track", "album"):
+        try:
+            owned = await library.check_items(results)
+            if len(owned) == len(results):
+                if novelty == "new":
+                    results = [r for r, o in zip(results, owned) if not o]
+                elif novelty == "library":
+                    results = [r for r, o in zip(results, owned) if o]
+        except Exception:
+            pass
+
     return {"results": results, "tag": tag_name, "type": type}
 
 
@@ -59,3 +88,30 @@ async def get_radio(
     if not tracks:
         raise HTTPException(404, "No radio tracks found")
     return {"tracks": tracks, "source": source}
+
+
+@router.get("/radio/track")
+async def get_track_radio_endpoint(
+    track: str = Query(..., min_length=1),
+    artist: str = Query(..., min_length=1),
+    album: str = "",
+    id: str = "",
+    camelot: str = "",
+    bpm: float | None = None,
+    limit: int = Query(25, ge=1, le=50),
+    vibe: str = Query("", pattern="^(calm|)$"),
+    user: dict = Depends(auth.get_current_user),
+):
+    source = app_settings._settings.get("recommendation_source", "combined")
+    seed = {
+        "name": track,
+        "artist": artist,
+        "album": album,
+        "id": id,
+        "camelot": camelot,
+        "bpm": bpm,
+    }
+    recs = await radio.get_track_radio(seed, source, limit, vibe=vibe or None)
+    if not recs:
+        raise HTTPException(404, "No radio tracks found")
+    return {"tracks": recs, "seed": {"name": track, "artist": artist}, "source": source}

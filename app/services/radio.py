@@ -199,13 +199,18 @@ def _prune_profile_cache(now: float) -> None:
         stale = [k for k, (ts, _) in _profile_cache.items() if now - ts >= _PROFILE_TTL]
         for k in stale:
             _profile_cache.pop(k, None)
-            _profile_locks.pop(k, None)
+            lock = _profile_locks.get(k)
+            # Never evict a lock a coroutine currently holds (would break single-flight)
+            if lock is not None and not lock.locked():
+                _profile_locks.pop(k, None)
         return
     # Over cap: drop oldest half
     items = sorted(_profile_cache.items(), key=lambda kv: kv[1][0])
     for k, _ in items[: len(items) // 2]:
         _profile_cache.pop(k, None)
-        _profile_locks.pop(k, None)
+        lock = _profile_locks.get(k)
+        if lock is not None and not lock.locked():
+            _profile_locks.pop(k, None)
 
 
 async def _build_profile(tracks: list[dict]) -> dict:
@@ -276,6 +281,7 @@ async def _build_profile_uncached(tracks: list[dict], key: str, now: float) -> d
 _taste_cache: dict[str, tuple[float, list[dict]]] = {}
 _taste_locks: dict[str, asyncio.Lock] = {}
 _TASTE_TTL = 600  # 10 min, mirrors the profile cache
+_TASTE_CACHE_MAX = 64
 
 
 async def _gather_taste_tracks(user: dict | None) -> list[dict]:
@@ -347,11 +353,25 @@ async def _build_taste_profile(user: dict | None) -> dict | None:
             else:
                 taste_tracks = await _gather_taste_tracks(user)
                 _taste_cache[uname] = (now, taste_tracks)
+
+                def _drop_taste(k: str) -> None:
+                    _taste_cache.pop(k, None)
+                    lock = _taste_locks.get(k)
+                    # Never evict a lock a coroutine currently holds
+                    if lock is not None and not lock.locked():
+                        _taste_locks.pop(k, None)
+
                 # cheap prune of stale entries
                 for k in [k for k, (ts, _) in _taste_cache.items()
                           if now - ts >= _TASTE_TTL and k != uname]:
-                    _taste_cache.pop(k, None)
-                    _taste_locks.pop(k, None)
+                    _drop_taste(k)
+                # bounded cache: drop oldest entries down to the cap
+                if len(_taste_cache) > _TASTE_CACHE_MAX:
+                    items = sorted(_taste_cache.items(), key=lambda kv: kv[1][0])
+                    overflow = len(_taste_cache) - _TASTE_CACHE_MAX
+                    for k, _ in items[:overflow]:
+                        if k != uname:
+                            _drop_taste(k)
 
     if not taste_tracks:
         return None
@@ -512,6 +532,255 @@ def _tempo_coherence_score(track: dict, seed_bpm: float, seed_camelot: str | Non
     return score
 
 
+# Vibe tag sets for the "calm" mode of seed-track radio.
+CALM_TAGS = {
+    "rnb", "r&b", "soul", "neo soul", "chillout", "downtempo", "acoustic",
+    "ballad", "sensual", "lyrical", "slow jam", "zouk love", "cabo love",
+    "tarraxinha",
+}
+ENERGY_TAGS = {"dance", "edm", "club", "electro", "house", "party", "uptempo", "hard"}
+_CALM_BPM_LO = 58.0
+_CALM_BPM_HI = 86.0
+
+
+def _calm_bpm_ok(track: dict) -> bool:
+    """Calm-vibe BPM gate. Drops a candidate only when its BPM is *known and
+    trusted* (cached, conf>=0.5) and neither the BPM nor its /2 or *2 fold lands
+    in the calm band. Unknown/untrusted BPM is kept (degrade gracefully)."""
+    c = bpm_service.get_cached_bpm(track.get("name", ""), track.get("artist", ""))
+    if not c:
+        return True
+    cand_bpm = c.get("bpm")
+    conf = c.get("confidence") or 0.3
+    if not cand_bpm or cand_bpm <= 0 or conf < 0.5:
+        return True
+    for b in (float(cand_bpm), float(cand_bpm) / 2.0, float(cand_bpm) * 2.0):
+        if _CALM_BPM_LO <= b <= _CALM_BPM_HI:
+            return True
+    return False
+
+
+async def get_track_radio(
+    seed: dict,
+    source: str = "combined",
+    limit: int = 25,
+    exclude: list[dict] | None = None,
+    vibe: str | None = None,
+    tempo_coherent: bool = True,
+) -> list[dict]:
+    """Seed-track "More like this" radio.
+
+    Dedicated recall around a single seed track (NOT the taste-blended
+    get_playlist_recommendations — that pulls away from the seed's vibe).
+
+    Recall arms (parallel, each degrades to []):
+      A. Last.fm similar tracks (primary, carries `match`)
+      B. seed's own top tags → per-tag top tracks (collects seed_tags)
+      C. Deezer artist radio (artist-level)
+      D. Navidrome similar songs (library-grounded)
+
+    Scored synchronously + deterministically, diversified max 2/artist.
+    vibe='calm' adds calm/energy tag scoring and a BPM gate.
+    """
+    seed_name = (seed.get("name") or "").strip()
+    seed_artist = (seed.get("artist") or "").strip()
+    if not seed_name or not seed_artist:
+        return []
+
+    seed_artist_norm = _norm_artist(seed_artist)
+    provider = app_settings._settings.get("search_provider", "deezer")
+    fallback = app_settings._settings.get("search_fallback", "")
+
+    # ── Recall (parallel) ──────────────────────────────────────────
+    async def _arm_similar() -> list[dict]:
+        if not lastfm.LASTFM_API_KEY:
+            return []
+        try:
+            sim = await lastfm.get_similar_tracks(seed_name, seed_artist, 50)
+            return await _resolve_lastfm_tracks(sim, provider, fallback)
+        except Exception as e:
+            logger.warning("Track radio: similar-tracks arm failed: %s", e)
+            return []
+
+    seed_tags: set[str] = set()
+
+    async def _arm_seed_tags() -> list[dict]:
+        if not lastfm.LASTFM_API_KEY:
+            return []
+        try:
+            raw_tags = await lastfm.get_track_top_tags(seed_name, seed_artist, 6)
+            if not raw_tags:
+                raw_tags = await lastfm.get_artist_top_tags(seed_artist, 6)
+            tag_names = [t["name"] for t in raw_tags if t.get("name")][:3]
+            for t in raw_tags:
+                tn = (t.get("name") or "").lower().strip()
+                if tn:
+                    seed_tags.add(tn)
+            if not tag_names:
+                return []
+            sub = await asyncio.gather(*[
+                lastfm.get_tag_tracks(tn, limit=15, page=1) for tn in tag_names
+            ], return_exceptions=True)
+            collected: list[dict] = []
+            for r in sub:
+                if isinstance(r, list):
+                    collected.extend(r)
+            return await _resolve_lastfm_tracks(collected, provider, fallback)
+        except Exception as e:
+            logger.warning("Track radio: seed-tags arm failed: %s", e)
+            return []
+
+    async def _arm_deezer() -> list[dict]:
+        try:
+            return await _get_deezer_radio("", seed_artist, limit)
+        except Exception as e:
+            logger.warning("Track radio: deezer arm failed: %s", e)
+            return []
+
+    async def _arm_navidrome() -> list[dict]:
+        if not library.NAVIDROME_PASSWORD:
+            return []
+        try:
+            return await library.get_similar_songs(seed_artist, seed_name, 20)
+        except Exception as e:
+            logger.warning("Track radio: navidrome arm failed: %s", e)
+            return []
+
+    arm_sources = ["similar", "tag", "deezer", "navidrome"]
+    results = await asyncio.gather(
+        _arm_similar(), _arm_seed_tags(), _arm_deezer(), _arm_navidrome(),
+        return_exceptions=True,
+    )
+
+    # ── Aggregate candidates with source tracking + max(match) ──────
+    candidates: dict[tuple[str, str], dict] = {}
+    for src, res in zip(arm_sources, results):
+        if not isinstance(res, list):
+            continue
+        for t in res:
+            k = _norm_key(t)
+            if not k[0]:
+                continue
+            # Skip the seed itself.
+            if k[0] == _norm_name(seed_name) and k[1] == seed_artist_norm:
+                continue
+            entry = candidates.get(k)
+            if entry is None:
+                entry = {"track": t, "sources": set(), "match": 0.0}
+                candidates[k] = entry
+            entry["sources"].add(src)
+            m = float(t.get("match") or 0)
+            if m > entry["match"]:
+                entry["match"] = m
+
+    exclude_keys = {_norm_key(t) for t in (exclude or [])}
+
+    # ── Seed tempo context (prefer seed-provided, else cache) ───────
+    seed_bpm: float | None = None
+    seed_camelot: str | None = None
+    if tempo_coherent:
+        sb = seed.get("bpm")
+        try:
+            if sb and float(sb) > 0:
+                seed_bpm = float(sb)
+        except (TypeError, ValueError):
+            seed_bpm = None
+        sc = seed.get("camelot")
+        if sc and _parse_camelot(sc):
+            seed_camelot = sc
+        if seed_bpm is None and seed_camelot is None:
+            c = bpm_service.get_cached_bpm(seed_name, seed_artist)
+            if c:
+                b = c.get("bpm")
+                if b and b > 0 and (c.get("confidence") or 0) >= 0.5:
+                    seed_bpm = float(b)
+                if c.get("camelot"):
+                    seed_camelot = c["camelot"]
+
+    seed_tags_lc = {s.lower().strip() for s in seed_tags if s}
+
+    # ── Pre-fetch distinct candidate-artist tags ONCE ──────────────
+    artist_tags: dict[str, set[str]] = {}
+    if lastfm.LASTFM_API_KEY:
+        distinct_artists: set[str] = set()
+        for key, entry in candidates.items():
+            if key in exclude_keys or not entry["sources"]:
+                continue
+            an = _norm_artist(entry["track"].get("artist") or "")
+            if an:
+                distinct_artists.add(an)
+
+        async def _fetch_artist_tags(an: str):
+            try:
+                async with _lastfm_sem:
+                    cand_tags = await lastfm.get_artist_top_tags(an, limit=6)
+                artist_tags[an] = {ct["name"].lower().strip() for ct in cand_tags}
+            except Exception:
+                artist_tags[an] = set()
+
+        await asyncio.gather(*[_fetch_artist_tags(a) for a in distinct_artists])
+
+    # ── Score (sync, deterministic) ────────────────────────────────
+    seed_artist_count = 0  # how many seed-artist candidates we've kept
+
+    def _score_one(key: tuple[str, str], entry: dict) -> tuple[float, dict] | None:
+        nonlocal seed_artist_count
+        if key in exclude_keys:
+            return None
+        track = entry["track"]
+        artist_n = _norm_artist(track.get("artist") or "")
+        cand_tags = artist_tags.get(artist_n, set())
+
+        # ── Calm-vibe BPM gate ──
+        if vibe == "calm" and not _calm_bpm_ok(track):
+            return None
+
+        score = 0.0
+        score += 3.5 * entry["match"]
+        score += 2.0 * len(entry["sources"])
+        if seed_tags_lc and cand_tags:
+            score += 1.5 * len(cand_tags & seed_tags_lc)
+        if "navidrome" in entry["sources"]:
+            score += 1.5
+        if seed_bpm is not None:
+            score += _tempo_coherence_score(track, seed_bpm, seed_camelot)
+
+        # Seed-artist penalty: keep the seed's own catalog from flooding the radio.
+        if artist_n == seed_artist_norm:
+            if seed_artist_count >= 1:
+                score -= 4.0
+            seed_artist_count += 1
+
+        # ── Calm-vibe tag steering ──
+        if vibe == "calm" and cand_tags:
+            score += 2.0 * len(cand_tags & CALM_TAGS)
+            score -= 2.0 * len(cand_tags & ENERGY_TAGS)
+
+        return (score, track)
+
+    scored: list[tuple[float, dict]] = []
+    for k, v in candidates.items():
+        r = _score_one(k, v)
+        if r is not None:
+            scored.append(r)
+
+    scored.sort(key=lambda x: -x[0])
+
+    # ── Diversify: max 2 per artist ────────────────────────────────
+    per_artist: dict[str, int] = {}
+    final: list[dict] = []
+    for _s, t in scored:
+        a = _norm_artist(t.get("artist") or "")
+        if per_artist.get(a, 0) >= 2:
+            continue
+        per_artist[a] = per_artist.get(a, 0) + 1
+        final.append(t)
+        if len(final) >= limit:
+            break
+
+    return final
+
+
 async def get_playlist_recommendations(
     tracks: list[dict],
     source: str = "combined",
@@ -595,11 +864,6 @@ async def get_playlist_recommendations(
         tasks.append(_sim_artists_chain())
         source_map.append("similar_artists")
 
-    # E) Spotify recommendations (best-effort; may 404 for new apps post-Nov 2024)
-    if spotify.SPOTIFY_CLIENT_ID:
-        tasks.append(_get_spotify_playlist_recs(seeds, limit=15))
-        source_map.append("spotify")
-
     # F) Navidrome similar songs per seed (library-grounded recall; degrades to [])
     if library.NAVIDROME_PASSWORD:
         for seed in seeds[:3]:
@@ -638,12 +902,33 @@ async def get_playlist_recommendations(
     # ── Tempo context for DJ-style coherence (gated by tempo_coherent) ──
     seed_bpm, seed_camelot = (_seed_tempo_context(seeds) if tempo_coherent else (None, None))
 
-    # ── Score candidates ───────────────────────────────────────────
-    scored: list[tuple[float, dict]] = []
+    # ── Pre-fetch candidate artist tags ONCE per distinct artist ────
+    # (avoids an N+1 Last.fm lookup inside scoring; one call per distinct
+    # non-excluded candidate artist that has >=1 source, run concurrently)
+    artist_tags: dict[str, set[str]] = {}
+    if top_tag_names and lastfm.LASTFM_API_KEY:
+        distinct_artists: set[str] = set()
+        for key, entry in candidates.items():
+            if key in exclude_keys or not entry["sources"]:
+                continue
+            an = _norm_artist(entry["track"].get("artist") or "")
+            if an:
+                distinct_artists.add(an)
 
-    async def _score_one(key: tuple[str, str], entry: dict):
+        async def _fetch_artist_tags(an: str):
+            try:
+                async with _lastfm_sem:
+                    cand_tags = await lastfm.get_artist_top_tags(an, limit=6)
+                artist_tags[an] = {ct["name"].lower().strip() for ct in cand_tags}
+            except Exception:
+                artist_tags[an] = set()
+
+        await asyncio.gather(*[_fetch_artist_tags(a) for a in distinct_artists])
+
+    # ── Score candidates (synchronous, deterministic) ──────────────
+    def _score_one(key: tuple[str, str], entry: dict) -> tuple[float, dict] | None:
         if key in exclude_keys:
-            return
+            return None
         track = entry["track"]
         artist_n = _norm_artist(track.get("artist") or "")
         score = 0.0
@@ -651,11 +936,9 @@ async def get_playlist_recommendations(
         score += len(entry["sources"]) * 2.0
         # Last.fm direct similarity score
         score += entry["match"] * 3.0
-        # Tag overlap with playlist centroid (needs Last.fm lookup; gated)
+        # Tag overlap with playlist centroid (uses pre-fetched artist tags)
         if top_tag_names and lastfm.LASTFM_API_KEY and len(entry["sources"]) >= 1:
-            async with _lastfm_sem:
-                cand_tags = await lastfm.get_artist_top_tags(artist_n, limit=6)
-            cand_tag_set = {ct["name"].lower().strip() for ct in cand_tags}
+            cand_tag_set = artist_tags.get(artist_n, set())
             overlap = len(cand_tag_set & top_tag_names)
             score += overlap * 1.5
         # Slight bonus if artist already in playlist (familiar) but not too strong
@@ -673,9 +956,14 @@ async def get_playlist_recommendations(
         # Boost for accepted artists (user-confirmed direction)
         if artist_n in accepted_artists:
             score += 2.0
-        scored.append((score, track))
+        return (score, track)
 
-    await asyncio.gather(*[_score_one(k, v) for k, v in candidates.items()])
+    # Deterministic: iterate candidates in insertion order, sync scoring
+    scored: list[tuple[float, dict]] = []
+    for k, v in candidates.items():
+        r = _score_one(k, v)
+        if r is not None:
+            scored.append(r)
 
     scored.sort(key=lambda x: -x[0])
 
@@ -692,24 +980,3 @@ async def get_playlist_recommendations(
             break
 
     return final
-
-
-async def _get_spotify_playlist_recs(seeds: list[dict], limit: int = 15) -> list[dict]:
-    """Get Spotify recommendations by resolving seed tracks to Spotify IDs."""
-    sem = asyncio.Semaphore(3)
-
-    async def resolve_id(track: dict) -> str | None:
-        async with sem:
-            try:
-                result = await spotify.resolve_url(track.get("name", ""), track.get("artist", ""), "track")
-                return result.get("id") if result else None
-            except Exception:
-                return None
-
-    ids = await asyncio.gather(*[resolve_id(s) for s in seeds[:5]])
-    track_ids = [i for i in ids if i]
-
-    if not track_ids:
-        return []
-
-    return await spotify.get_recommendations(seed_tracks=track_ids, limit=limit)

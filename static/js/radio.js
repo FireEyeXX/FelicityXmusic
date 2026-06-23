@@ -29,6 +29,35 @@ export async function startRadio(item) {
   }
 }
 
+// ── Start Track Radio ("More like this") ──
+export async function startTrackRadio(item, opts = {}) {
+  const params = new URLSearchParams({
+    track: item.name || '',
+    artist: item.artist || '',
+    limit: '25',
+  });
+  // Optional params: only send when present — an empty bpm/camelot would
+  // fail the backend's float/typed parsing (422). Mirrors startRadio.
+  if (item.id) params.set('id', item.id);
+  if (item.camelot) params.set('camelot', item.camelot);
+  if (item.bpm) params.set('bpm', item.bpm);
+  if (opts.vibe) params.set('vibe', opts.vibe);
+  showToast(opts.vibe === 'calm' ? 'Starting calm radio...' : 'Starting radio...');
+  try {
+    const data = await apiJson(`/api/radio/track?${params}`);
+    const tracks = data.tracks || [];
+    if (!tracks.length) { showToast('No radio tracks found'); return; }
+    store.radioMode = true;
+    store.radioSeedTrack = item;
+    store.radioLoading = false;
+    // Switches active playlist context to Radio temp playlist + plays
+    await playRadio(tracks);
+    showToast(`Playing radio based on ${item.name || item.artist}`);
+  } catch (e) {
+    showToast('Radio failed: ' + e.message);
+  }
+}
+
 // ── Init ──
 export function init() {
   // Radio button on cards (event delegation)

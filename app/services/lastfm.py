@@ -51,6 +51,13 @@ async def get_top_tags(limit: int = 50) -> list[dict]:
 async def get_tag_tracks(tag: str, limit: int = 20, page: int = 1) -> list[dict]:
     data = await _get("tag.getTopTracks", {"tag": tag, "limit": limit, "page": page})
     tracks = data.get("tracks", {}).get("track", [])
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
     return [
         {
             "name": t.get("name", ""),
@@ -58,6 +65,7 @@ async def get_tag_tracks(tag: str, limit: int = 20, page: int = 1) -> list[dict]
             "image": _pick_image(t.get("image", [])),
             "type": "track",
             "url": "",
+            "listeners": _int(t.get("listeners")),
         }
         for t in tracks
     ]

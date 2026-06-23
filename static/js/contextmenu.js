@@ -250,6 +250,14 @@ export function buildActionsFor(item, type, context = {}) {
       label: 'Add to playlist', icon: '+',
       onClick: () => _addToQueue([it]),
     });
+    actions.push({
+      label: 'More like this', icon: '&#128251;',
+      onClick: () => import('./radio.js').then(m => m.startTrackRadio(it)),
+    });
+    actions.push({
+      label: 'More like this (calm)', icon: '&#127769;',
+      onClick: () => import('./radio.js').then(m => m.startTrackRadio(it, { vibe: 'calm' })),
+    });
     actions.push({ divider: true });
   } else if (type === 'album') {
     actions.push({

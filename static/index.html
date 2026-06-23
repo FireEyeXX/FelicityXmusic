@@ -269,6 +269,10 @@
 <main id="pageDiscover" style="display:none">
   <div id="tagCloudView">
     <h2 class="page-title">Discover by Genre</h2>
+    <div class="tag-presets">
+      <span class="tag-presets-label">Zouk picks</span>
+      <div id="tagPresets" class="tag-cloud"></div>
+    </div>
     <div id="tagCloud" class="tag-cloud"></div>
   </div>
   <div id="tagDetailView" style="display:none;">
@@ -281,6 +285,15 @@
         <button class="type-btn active" data-tagtype="track">Tracks</button>
         <button class="type-btn" data-tagtype="album">Albums</button>
         <button class="type-btn" data-tagtype="artist">Artists</button>
+      </div>
+      <div class="type-toggle" id="tagNovelty">
+        <button class="type-btn active" data-novelty="">All</button>
+        <button class="type-btn" data-novelty="new">New to me</button>
+        <button class="type-btn" data-novelty="library">In library</button>
+      </div>
+      <div class="type-toggle" id="tagDepth">
+        <button class="type-btn active" data-depth="">Popular</button>
+        <button class="type-btn" data-depth="deep">Deeper cuts</button>
       </div>
       <input id="tagFilter" type="text" class="search-input" placeholder="Filter results..." style="flex:1; min-width:150px; max-width:300px; padding:10px 16px; font-size:14px;">
     </div>

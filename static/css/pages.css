@@ -1,4 +1,18 @@
 /* ── Discover / Tags ── */
+.tag-presets {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin-bottom: 20px; padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.tag-presets-label {
+  font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-dim); margin-right: 4px;
+}
+.tag-chip-preset {
+  background: var(--accent-dim); border-color: var(--accent);
+  color: var(--accent);
+}
+.tag-chip-preset:hover { box-shadow: 0 0 16px rgba(162,230,64,.18); }
 .tag-cloud { display: flex; flex-wrap: wrap; gap: 10px; }
 .tag-chip {
   background: var(--bg-card); border: 1px solid var(--border);

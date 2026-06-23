@@ -6,8 +6,24 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderResults, checkLibrary, cardPlayBtn, cardDlBtn, cardRadioBtn, cardFavBtn, cardSubHtml } from './search.js';
 
+// Curated quick-access genre chips for zouk-family discovery.
+// Limited to Last.fm tags that actually return tracks (verified via API):
+// dropped 'brazilian zouk' (0 results) and 'soulzouk' (0); added 'zouk love' (rich).
+const ZOUK_PRESETS = ['zouk', 'zouk love', 'kizomba', 'cabo love', 'tarraxinha', 'lambada', 'ghetto zouk'];
+
 // ── Load Tags ──
 export async function loadTags() {
+  const presets = $('#tagPresets');
+  if (presets && !presets.dataset.built) {
+    presets.innerHTML = ZOUK_PRESETS.map(t =>
+      `<button class="tag-chip tag-chip-preset" data-tag="${esc(t)}">${esc(t)}</button>`
+    ).join('');
+    $$('.tag-chip', presets).forEach(chip => {
+      chip.addEventListener('click', () => loadTagResults(chip.dataset.tag));
+    });
+    presets.dataset.built = '1';
+  }
+
   const cloud = $('#tagCloud');
   cloud.innerHTML = '<div class="skeleton" style="height:200px;"></div>';
   $('#tagCloudView').style.display = '';
@@ -29,23 +45,38 @@ export async function loadTags() {
 // ── Load Tag Results ──
 export async function loadTagResults(tag, type, append) {
   if (!append) {
+    const switchingTag = tag !== store.currentTag;
     store.currentTag = tag;
     store.discoverTagType = type || 'track';
     store.tagPage = 1;
     store.tagHasMore = true;
     store.allTagResults = [];
+    // Reset discovery-mode filters when opening a different tag.
+    if (switchingTag) {
+      store.tagNovelty = '';
+      store.tagDepth = '';
+    }
     $('#tagCloudView').style.display = 'none';
     $('#tagDetailView').style.display = '';
     history.pushState({ layer: 'tagDetail' }, '');
     $('#tagDetailName').textContent = tag;
     $('#tagFilter').value = '';
     $$('[data-tagtype]').forEach(b => b.classList.toggle('active', b.dataset.tagtype === store.discoverTagType));
+    $$('[data-novelty]').forEach(b => b.classList.toggle('active', b.dataset.novelty === (store.tagNovelty || '')));
+    $$('[data-depth]').forEach(b => b.classList.toggle('active', b.dataset.depth === (store.tagDepth || '')));
+    // Filters apply only where the backend honors them: novelty → track+album, depth → track.
+    // Hide the inert toggles for the other result types.
+    const novEl = $('#tagNovelty'); if (novEl) novEl.style.display = (store.discoverTagType === 'artist') ? 'none' : '';
+    const depEl = $('#tagDepth'); if (depEl) depEl.style.display = (store.discoverTagType === 'track') ? '' : 'none';
     $('#tagResults').innerHTML = Array(8).fill('<div class="skeleton skeleton-card"></div>').join('');
   }
   store.tagLoading = true;
   $('#tagLoadMore').style.display = '';
   try {
-    const data = await apiJson(`/api/discover/tag/${encodeURIComponent(tag)}?type=${store.discoverTagType}&limit=20&page=${store.tagPage}`);
+    let qs = `type=${store.discoverTagType}&limit=20&page=${store.tagPage}`;
+    if (store.tagNovelty) qs += `&novelty=${store.tagNovelty}`;
+    if (store.tagDepth) qs += `&depth=${store.tagDepth}`;
+    const data = await apiJson(`/api/discover/tag/${encodeURIComponent(tag)}?${qs}`);
     if (data.results.length < 20) store.tagHasMore = false;
     store.allTagResults = store.allTagResults.concat(data.results);
     if (!append) {
@@ -107,6 +138,23 @@ export function init() {
   $$('[data-tagtype]').forEach(btn => {
     btn.addEventListener('click', () => {
       if (store.currentTag) loadTagResults(store.currentTag, btn.dataset.tagtype);
+    });
+  });
+
+  $$('[data-novelty]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      store.tagNovelty = btn.dataset.novelty || '';
+      $$('[data-novelty]').forEach(b => b.classList.toggle('active', b === btn));
+      // Re-run with the same tag so switchingTag stays false and filters persist.
+      if (store.currentTag) loadTagResults(store.currentTag, store.discoverTagType);
+    });
+  });
+
+  $$('[data-depth]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      store.tagDepth = btn.dataset.depth || '';
+      $$('[data-depth]').forEach(b => b.classList.toggle('active', b === btn));
+      if (store.currentTag) loadTagResults(store.currentTag, store.discoverTagType);
     });
   });
 

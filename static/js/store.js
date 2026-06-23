@@ -40,6 +40,8 @@ export const store = {
   tagLoading: false,
   tagHasMore: true,
   allTagResults: [],
+  tagNovelty: '',
+  tagDepth: '',
 
   // ── Search ──
   searchOffset: 0,
