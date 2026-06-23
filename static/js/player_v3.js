@@ -95,7 +95,16 @@ function _createDeckNodes() {
 
 function _ensureAudioContext() {
   if (_ctx) return;
-  _ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const _AC = window.AudioContext || window.webkitAudioContext;
+  try {
+    // Match the library's dominant sample rate (~48 kHz) so MediaElementSource does NOT
+    // resample inside the graph (the FLAC/MP3 library is overwhelmingly 48 kHz). On a
+    // 48 kHz output device this is fully transparent; on a 44.1 kHz device the single
+    // unavoidable resample happens once at the OS output instead of twice.
+    _ctx = new _AC({ sampleRate: 48000, latencyHint: 'playback' });
+  } catch (e) {
+    _ctx = new _AC(); // device can't honor 48 kHz → fall back to default
+  }
   _nodesA = _createDeckNodes();
   _nodesB = _createDeckNodes();
 
@@ -272,8 +281,10 @@ function _startCrossfade(seekable = true) {
     if (!IS_WEBKIT && newDeck.playbackRate !== 1.0) {
       const startRate = newDeck.playbackRate;
       const diff = Math.abs(startRate - 1.0);
-      // Slower return for larger tempo differences: 30s for ±8%, 15s for ±2%
-      const returnSec = Math.max(15, Math.round(diff * 400));
+      // Settle the new track to its true tempo QUICKLY (~3-6s, eased) so it doesn't play
+      // time-stretched + off-tempo under the dancer's feet for 15-30s. The beatmatch was
+      // for the transition overlap; once the new track is solo it should be at 1.0x fast.
+      const returnSec = Math.min(6, Math.max(3, Math.round(diff * 80)));
       const steps = Math.round(returnSec * 2); // 2 steps/sec
       let step = 0;
       _rateReturnTimer = setInterval(() => {

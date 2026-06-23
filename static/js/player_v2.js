@@ -41,7 +41,13 @@ function _crossfadeDur() { return parseInt(_djSetting('crossfade_sec', '5')) || 
 
 function _ensureAudioContext() {
   if (_ctx) return;
-  _ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const _AC = window.AudioContext || window.webkitAudioContext;
+  try {
+    // Match the library's dominant 48 kHz so MediaElementSource doesn't resample in-graph.
+    _ctx = new _AC({ sampleRate: 48000, latencyHint: 'playback' });
+  } catch (e) {
+    _ctx = new _AC();
+  }
   _gainA = _ctx.createGain();
   _gainB = _ctx.createGain();
 
