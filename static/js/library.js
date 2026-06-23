@@ -1,7 +1,7 @@
 // library.js — Navidrome library playlists management
 
 import { store } from './store.js';
-import { $, $$, esc, showToast, historyBack, showPlaylistPicker } from './utils.js';
+import { $, $$, esc, showToast, historyBack, showPlaylistPicker, showInputModal } from './utils.js';
 import { apiJson } from './api.js';
 import { renderResults } from './search.js';
 import { fetchPlaylistBpm, addBpmBadges, createBpmFilter, addScanButton } from './bpm.js';
@@ -121,11 +121,11 @@ async function _playLibraryPlaylist(pl, playNow) {
 }
 
 async function _renameLibraryPlaylist(pl) {
-  const name = prompt('Rename playlist:', pl.name);
-  if (!name || !name.trim() || name.trim() === pl.name) return;
+  const name = await showInputModal('Rename playlist', pl.name, { okLabel: 'Rename' });
+  if (!name || name === pl.name) return;
   try {
     await apiJson(`/api/library/playlist/${pl.id}/rename`, {
-      method: 'PUT', body: { name: name.trim() },
+      method: 'PUT', body: { name },
     });
     libraryCache = null;
     loadLibrary();
@@ -653,17 +653,17 @@ export function init() {
   const renameBtn = $('#renameLibPlaylist');
   if (renameBtn) renameBtn.addEventListener('click', async () => {
     if (!currentLibPlaylistId) return;
-    const name = prompt('Rename playlist:', currentLibPlaylistName);
-    if (!name || !name.trim() || name.trim() === currentLibPlaylistName) return;
+    const name = await showInputModal('Rename playlist', currentLibPlaylistName, { okLabel: 'Rename' });
+    if (!name || name === currentLibPlaylistName) return;
     try {
       await apiJson(`/api/library/playlist/${currentLibPlaylistId}/rename`, {
         method: 'PUT',
-        body: { name: name.trim() },
+        body: { name },
       });
-      currentLibPlaylistName = name.trim();
-      $('#libDetailName').textContent = name.trim();
+      currentLibPlaylistName = name;
+      $('#libDetailName').textContent = name;
       if (store.playlistMode && store.playlistMode.id === currentLibPlaylistId) {
-        store.playlistMode.name = name.trim();
+        store.playlistMode.name = name;
       }
       libraryCache = null;
       showToast('Playlist renamed');
@@ -675,15 +675,15 @@ export function init() {
   // Duplicate Playlist
   const dupBtn = $('#duplicateLibPlaylist');
   if (dupBtn) dupBtn.addEventListener('click', async () => {
-    if (!currentLibPlaylistId || !currentLibPlaylistTracks.length) return;
-    const name = prompt('Duplicate as:', currentLibPlaylistName + ' (copy)');
-    if (!name || !name.trim()) return;
+    if (!currentLibPlaylistId) return;
+    const name = await showInputModal('Duplicate playlist as', currentLibPlaylistName + ' (copy)', { okLabel: 'Duplicate' });
+    if (!name) return;
     try {
       // Create new playlist
-      await apiJson('/api/library/playlist', { method: 'POST', body: { name: name.trim() } });
+      await apiJson('/api/library/playlist', { method: 'POST', body: { name } });
       // Find new playlist ID
       const data = await apiJson('/api/library/playlists');
-      const pl = (data.playlists || []).find(p => p.name === name.trim());
+      const pl = (data.playlists || []).find(p => p.name === name);
       if (!pl) throw new Error('Playlist not created');
       // Add all tracks
       const songIds = currentLibPlaylistTracks.map(t => t.id).filter(Boolean);
@@ -694,7 +694,7 @@ export function init() {
         });
       }
       libraryCache = null;
-      showToast(`Duplicated as "${name.trim()}" (${songIds.length} tracks)`);
+      showToast(`Duplicated as "${name}" (${songIds.length} tracks)`);
     } catch (e) {
       showToast('Failed to duplicate');
     }
@@ -786,10 +786,10 @@ export function init() {
   // New Playlist
   const newBtn = $('#newLibPlaylist');
   if (newBtn) newBtn.addEventListener('click', async () => {
-    const name = prompt('New playlist name:');
-    if (!name || !name.trim()) return;
+    const name = await showInputModal('New playlist', '', { okLabel: 'Create', placeholder: 'Playlist name' });
+    if (!name) return;
     try {
-      await apiJson('/api/library/playlist', { method: 'POST', body: { name: name.trim() } });
+      await apiJson('/api/library/playlist', { method: 'POST', body: { name } });
       showToast('Playlist created');
       libraryCache = null;
       loadLibrary();

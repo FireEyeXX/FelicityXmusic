@@ -152,3 +152,38 @@ export function showPlaylistPicker(playlists, { multi = true } = {}) {
     });
   });
 }
+
+// Inline text-input modal — a reliable replacement for window.prompt(), which
+// browsers suppress after repeated dialogs ("don't allow this site to prompt").
+// Resolves to the trimmed string, or null on cancel / empty.
+export function showInputModal(title, defaultValue = '', { okLabel = 'OK', placeholder = '' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay open';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-card);border-radius:16px;padding:20px;min-width:280px;max-width:420px;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.5);';
+    modal.innerHTML = `
+      <div style="font-size:15px;font-weight:600;margin-bottom:14px;">${esc(title)}</div>
+      <input type="text" class="input-modal-field" placeholder="${esc(placeholder)}" style="padding:11px 12px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text);border-radius:10px;font-size:14px;outline:none;">
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button class="input-modal-ok" style="flex:1;padding:10px;border:none;background:var(--accent);color:#000;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">${esc(okLabel)}</button>
+        <button class="input-modal-cancel" style="flex:1;padding:10px;border:1px solid var(--border);background:none;color:var(--text-muted);border-radius:10px;cursor:pointer;font-size:13px;">Cancel</button>
+      </div>`;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    const input = modal.querySelector('.input-modal-field');
+    input.value = defaultValue || '';
+    const done = (val) => { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(val); };
+    const submit = () => { const v = input.value.trim(); done(v || null); };
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    };
+    document.addEventListener('keydown', onKey);
+    modal.querySelector('.input-modal-ok').addEventListener('click', submit);
+    modal.querySelector('.input-modal-cancel').addEventListener('click', () => done(null));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
