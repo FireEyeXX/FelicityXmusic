@@ -106,14 +106,15 @@ function _createDeckNodes() {
 }
 
 /**
- * Attenuate-only LUFS level-match gain toward TARGET (-14 LUFS).
- * Caps at 1.0 so a quiet track stays at unity and is NEVER boosted into the
- * master limiter. Returns 1 (unchanged behavior) when lufs is absent/non-finite.
+ * LUFS level-match gain — OFF by default (the library is already fairly consistent
+ * and the user didn't want volume lowered). Opt in by setting ms_dj_level_target to a
+ * LUFS target (e.g. -12); then it ATTENUATES loud tracks toward that target (cap 1.0 —
+ * never boosts, so it can't clip the limiter). Absent setting or lufs → 1 (no change).
  */
 function _levelGainFor(lufs) {
-  const TARGET = -14;
-  if (!Number.isFinite(lufs)) return 1;
-  const g = Math.pow(10, (TARGET - lufs) / 20);
+  const target = parseFloat(_djSetting('level_target', ''));
+  if (!Number.isFinite(target) || !Number.isFinite(lufs)) return 1;
+  const g = Math.pow(10, (target - lufs) / 20);
   return Math.min(1, g);
 }
 

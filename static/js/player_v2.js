@@ -76,14 +76,14 @@ function _ensureAudioContext() {
 }
 
 /**
- * Attenuate-only LUFS level-match gain toward TARGET (-14 LUFS), cap 1.0.
- * MANDATORY cap here: this engine has no master limiter, so a boost would clip.
- * Returns 1 (unchanged behavior) when lufs is absent/non-finite.
+ * LUFS level-match gain — OFF by default (opt in via ms_dj_level_target, a LUFS target
+ * e.g. -12). Attenuate-only (cap 1.0) — MANDATORY here, this engine has no master limiter
+ * so a boost would clip. Absent setting or lufs → 1 (no change).
  */
 function _levelGainFor(lufs) {
-  const TARGET = -14;
-  if (!Number.isFinite(lufs)) return 1;
-  const g = Math.pow(10, (TARGET - lufs) / 20);
+  const target = parseFloat(_djSetting('level_target', ''));
+  if (!Number.isFinite(target) || !Number.isFinite(lufs)) return 1;
+  const g = Math.pow(10, (target - lufs) / 20);
   return Math.min(1, g);
 }
 
