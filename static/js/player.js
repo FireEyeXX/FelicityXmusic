@@ -421,7 +421,7 @@ export function saveQueueDebounced() {
 async function saveQueueNow() {
   if (!store.currentUser) return;
   try {
-    await apiJson('/api/player/queue', {
+    return await apiJson('/api/player/queue', {
       method: 'PUT',
       body: {
         queue: store.playerQueue,
@@ -432,6 +432,14 @@ async function saveQueueNow() {
       },
     });
   } catch {}
+}
+
+// Synchronous (awaitable) flush of the pending queue save — cancels the debounce
+// timer and performs the PUT immediately. Used before engine-switch reloads so
+// recent queue/position changes are persisted to the server before unload.
+export async function flushQueue() {
+  clearTimeout(store.playerSaveTimer);
+  return saveQueueNow();
 }
 
 export async function loadQueueState() {

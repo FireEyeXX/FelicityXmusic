@@ -4,6 +4,7 @@ import { store } from './store.js';
 import { $, $$, esc, formatSize, showToast } from './utils.js';
 import { apiJson } from './api.js';
 import { switchPage } from './router.js';
+import { getPlayerModule } from './player_active.js';
 
 // ── Load Settings ──
 export async function loadSettings() {
@@ -121,7 +122,7 @@ async function _loadDeviceSettings() {
       engineEl.value = localStorage.getItem('ms_player_engine') || 'classic';
       if (!engineEl.dataset.bound) {
         engineEl.dataset.bound = '1';
-        engineEl.addEventListener('change', () => _toggleDjSection());
+        engineEl.addEventListener('change', _applyEngineChange);
       }
     }
     _toggleDjSection();
@@ -180,71 +181,177 @@ async function _saveDeviceSettings() {
     store.deviceName = name;
     store.deviceOutputMode = mode;
     store.deviceDlnaRendererUrl = dlnaUrl;
-    // Save player engine to localStorage
-    const engine = $('#settingPlayerEngine')?.value || 'classic';
-    localStorage.setItem('ms_player_engine', engine);
     const pf = $('#settingPrefetchEnabled')?.value || '1';
     localStorage.setItem('ms_prefetch_enabled', pf);
-    showToast('Device settings saved — reload to switch player engine');
+    showToast('Device settings saved');
     _loadMyDevices();
-    _toggleDjSection();
   } catch { showToast('Failed to save device settings', true); }
+}
+
+// Engine change requires a reload (memoized module, different audio graph).
+// Persist the active queue first, then reload with cache-bust + app_version.
+async function _applyEngineChange() {
+  const engineEl = $('#settingPlayerEngine');
+  if (!engineEl) return;
+  const prev = localStorage.getItem('ms_player_engine') || 'classic';
+  const next = engineEl.value;
+  if (next === prev) return;
+  try {
+    // Flush the current queue to the server on the OUTGOING engine module
+    // (resolved BEFORE flipping ms_player_engine) so recent queue/position
+    // changes are persisted before the reload unloads the page.
+    const m = await getPlayerModule();
+    await m.flushQueue?.();
+  } catch {}
+  localStorage.setItem('ms_player_engine', next);
+  _toggleDjSection();
+  showToast('Switching engine…');
+  const av = new URLSearchParams(window.location.search).get('app_version')
+    || localStorage.getItem('app_installed_version');
+  const params = '_=' + Date.now() + (av ? '&app_version=' + av : '');
+  window.location.href = window.location.origin + '/?' + params;
 }
 
 // ── DJ Mode Settings ──
 
 function _toggleDjSection() {
   const engine = $('#settingPlayerEngine')?.value || localStorage.getItem('ms_player_engine') || 'classic';
-  const section = $('#djModeSection');
-  if (section) section.style.display = ['crossfade', 'dj'].includes(engine) ? '' : 'none';
+  const isCf = engine === 'crossfade' || engine === 'dj';
+  // Engine selector lives inside #djModeSection now, so the section is always shown.
+  $$('.dj-cf-only').forEach(el => { el.style.display = isCf ? '' : 'none'; });
   $$('.dj-v3-only').forEach(el => { el.style.display = engine === 'dj' ? '' : 'none'; });
-  // Show prefetch toggle only for Classic player
+  // Show prefetch toggle (in "This Device") only for Classic player
   $$('.classic-only').forEach(el => { el.style.display = engine === 'classic' ? '' : 'none'; });
   // Load prefetch setting
   const pfEl = $('#settingPrefetchEnabled');
   if (pfEl) pfEl.value = localStorage.getItem('ms_prefetch_enabled') || '1';
 }
 
-const DJ_DEFAULTS = {
-  crossfade_beats: '16', crossfade_sec: '5', intro_skip: 'auto',
-  tempo_range: '8', transition_style: 'auto', smart_queue: 'off',
-  outro_skip: 'auto', outro_fade: '1', prefetch_count: '3', pre_analyze: '10',
-  bass_swap_point: '50', eq_kill_depth: '36', filter_resonance: '2',
+// Each entry: localStorage suffix (after `ms_dj_`) → { sel, def, badge?, fmt? }.
+// IMPORTANT: the suffix is the EXACT key the engine reads via _djSetting(suffix).
+// djmix.js selection knobs are read with a literal `dj_` prefix, e.g.
+// _djSetting('dj_artist_window') → ms_dj_dj_artist_window — so those suffixes
+// carry the double `dj_`. Verified against grep of _djSetting() in djmix/v2/v3.
+const DJ_CONFIG = {
+  // Engine group (cf+dj)
+  smart_queue:        { sel: '#settingDjSmartQueue',        def: 'off' },
+  // Transitions (cf+dj)
+  crossfade_beats:    { sel: '#settingDjCrossfadeBeats',    def: '16' },
+  crossfade_sec:      { sel: '#settingDjCrossfadeSec',      def: '5',  badge: '#valDjCrossfadeSec',  fmt: v => v + 's' },
+  transition_style:   { sel: '#settingDjTransitionStyle',   def: 'auto' },
+  intro_skip:         { sel: '#settingDjIntroSkip',         def: 'auto' },
+  outro_skip:         { sel: '#settingDjOutroSkip',         def: 'auto' },
+  outro_fade:         { sel: '#settingDjOutroFade',         def: '1', toggle: true },
+  // Tempo flow (cf+dj, advanced) — selection knobs read by djmix with `dj_` prefix
+  tempo_range:        { sel: '#settingDjTempoRange',        def: '8' },
+  dj_tempo_band:      { sel: '#settingDjTempoBand',         def: '8',  badge: '#valDjTempoBand' },
+  dj_tempo_oob_penalty:{ sel: '#settingDjTempoOobPenalty',  def: '3',  badge: '#valDjTempoOobPenalty' },
+  dj_inband_bonus:    { sel: '#settingDjInbandBonus',       def: '2',  badge: '#valDjInbandBonus' },
+  dj_bpm_conf_floor:  { sel: '#settingDjBpmConfFloor',      def: '0',  badge: '#valDjBpmConfFloor' },
+  dj_tempo_ramp:      { sel: '#settingDjTempoRamp',         def: '1',  badge: '#valDjTempoRamp' },
+  dj_tempo_peak:      { sel: '#settingDjTempoPeak',         def: '12', badge: '#valDjTempoPeak' },
+  // Energy (cf+dj, advanced)
+  dj_energy_weight:   { sel: '#settingDjEnergyWeight',      def: '10', badge: '#valDjEnergyWeight' },
+  dj_energy_ramp:     { sel: '#settingDjEnergyRamp',        def: '0.0375', badge: '#valDjEnergyRamp' },
+  dj_energy_peak:     { sel: '#settingDjEnergyPeak',        def: '0.30', badge: '#valDjEnergyPeak' },
+  dj_energy_peak_at:  { sel: '#settingDjEnergyPeakAt',      def: '8',  badge: '#valDjEnergyPeakAt' },
+  dj_energy_cooldown: { sel: '#settingDjEnergyCooldown',    def: '0.02', badge: '#valDjEnergyCooldown' },
+  // Harmony (cf+dj, advanced)
+  dj_key_weight:      { sel: '#settingDjKeyWeight',         def: '6',  badge: '#valDjKeyWeight' },
+  // Variety (cf+dj, advanced)
+  dj_artist_diversity:{ sel: '#settingDjArtistDiversity',   def: '6',  badge: '#valDjArtistDiversity' },
+  dj_artist_window:   { sel: '#settingDjArtistWindow',      def: '3',  badge: '#valDjArtistWindow' },
+  // EQ & Filters (dj only)
+  bass_swap_point:    { sel: '#settingDjBassSwapPoint',     def: '50' },
+  eq_kill_depth:      { sel: '#settingDjEqKillDepth',       def: '36' },
+  filter_resonance:   { sel: '#settingDjFilterResonance',   def: '2' },
+  rate_return_min:    { sel: '#settingDjRateReturnMin',     def: '15', badge: '#valDjRateReturnMin', fmt: v => v + 's' },
+  rate_return_scale:  { sel: '#settingDjRateReturnScale',   def: '400', badge: '#valDjRateReturnScale' },
+  // Buffering (cf+dj)
+  prefetch_count:     { sel: '#settingDjPrefetchCount',     def: '3' },
+  pre_analyze:        { sel: '#settingDjPreAnalyze',        def: '10' },
+  // level_target handled specially (toggle reveals number; '' when off)
 };
 
+function _setBadge(cfg, val) {
+  if (!cfg.badge) return;
+  const b = $(cfg.badge);
+  if (b) b.textContent = cfg.fmt ? cfg.fmt(val) : val;
+}
+
 function _loadDjSettings() {
-  for (const [key, def] of Object.entries(DJ_DEFAULTS)) {
-    const el = $(`#settingDj${key.replace(/_([a-z])/g, (_, c) => c.toUpperCase()).replace(/^./, c => c.toUpperCase())}`);
+  for (const [key, cfg] of Object.entries(DJ_CONFIG)) {
+    const el = $(cfg.sel);
     if (!el) continue;
     const stored = localStorage.getItem(`ms_dj_${key}`);
-    el.value = stored || def;
+    const val = (stored != null && stored !== '') ? stored : cfg.def;
+    if (cfg.toggle) {
+      el.checked = val === '1';
+    } else {
+      el.value = val;
+      _setBadge(cfg, val);
+    }
+    if (!el.dataset.djBound) {
+      el.dataset.djBound = '1';
+      const ev = (el.tagName === 'SELECT' || cfg.toggle) ? 'change' : 'input';
+      el.addEventListener(ev, () => {
+        if (!cfg.toggle) _setBadge(cfg, el.value);
+        _autoSaveDj(key, cfg.toggle ? (el.checked ? '1' : '0') : el.value);
+      });
+    }
+  }
+  // Loudness: toggle + target LUFS (writes ms_dj_level_target; '' when off)
+  const lvToggle = $('#settingDjLevelMatch');
+  const lvTarget = $('#settingDjLevelTarget');
+  const lvRow = $('#djLevelTargetRow');
+  if (lvToggle && lvTarget) {
+    const stored = localStorage.getItem('ms_dj_level_target');
+    const on = stored != null && stored !== '';
+    lvToggle.checked = on;
+    if (on) lvTarget.value = stored;
+    if (lvRow) lvRow.style.display = on ? '' : 'none';
+    const writeLevel = () => {
+      const enabled = lvToggle.checked;
+      if (lvRow) lvRow.style.display = enabled ? '' : 'none';
+      const val = enabled ? (lvTarget.value || '-14') : '';
+      localStorage.setItem('ms_dj_level_target', val);
+      _djSavedStatus();
+      getPlayerModule().then(m => m.applyDjSettings?.());
+    };
+    if (!lvToggle.dataset.djBound) {
+      lvToggle.dataset.djBound = '1';
+      lvToggle.addEventListener('change', writeLevel);
+    }
+    if (!lvTarget.dataset.djBound) {
+      lvTarget.dataset.djBound = '1';
+      lvTarget.addEventListener('input', _debounce(writeLevel, 300));
+    }
   }
 }
 
-function _saveDjSettings() {
-  const map = {
-    crossfade_beats: '#settingDjCrossfadeBeats',
-    crossfade_sec: '#settingDjCrossfadeSec',
-    intro_skip: '#settingDjIntroSkip',
-    tempo_range: '#settingDjTempoRange',
-    transition_style: '#settingDjTransitionStyle',
-    smart_queue: '#settingDjSmartQueue',
-    outro_skip: '#settingDjOutroSkip',
-    outro_fade: '#settingDjOutroFade',
-    prefetch_count: '#settingDjPrefetchCount',
-    pre_analyze: '#settingDjPreAnalyze',
-    bass_swap_point: '#settingDjBassSwapPoint',
-    eq_kill_depth: '#settingDjEqKillDepth',
-    filter_resonance: '#settingDjFilterResonance',
-  };
-  for (const [key, sel] of Object.entries(map)) {
-    const el = $(sel);
-    if (el) localStorage.setItem(`ms_dj_${key}`, el.value);
-  }
-  // Also update crossfade_duration for backward compat
-  localStorage.setItem('ms_crossfade_duration', $(map.crossfade_sec)?.value || '5');
+let _djSaveTimer = null;
+function _debounce(fn, ms) {
+  let t = null;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+function _djSavedStatus() {
   const status = $('#djSaveStatus');
-  if (status) { status.textContent = 'Saved!'; setTimeout(() => { status.textContent = ''; }, 2000); }
+  if (status) {
+    status.textContent = 'saved ✓';
+    clearTimeout(_djSaveTimer);
+    _djSaveTimer = setTimeout(() => { status.textContent = ''; }, 1500);
+  }
+}
+
+const _saveDjKey = _debounce((key, val) => {
+  localStorage.setItem(`ms_dj_${key}`, val);
+  _djSavedStatus();
+  getPlayerModule().then(m => m.applyDjSettings?.());
+}, 300);
+
+function _autoSaveDj(key, val) {
+  _saveDjKey(key, val);
 }
 
 // ── Disk Usage ──
@@ -598,8 +705,7 @@ export function init() {
 
   // Device settings
   $('#saveDeviceSettings')?.addEventListener('click', _saveDeviceSettings);
-  // DJ Mode settings
-  $('#saveDjSettings')?.addEventListener('click', _saveDjSettings);
+  // DJ settings auto-save (debounced) — bound per-control in _loadDjSettings().
   $('#settingOutputMode')?.addEventListener('change', () => {
     store.deviceOutputMode = $('#settingOutputMode').value;
     _toggleDeviceDlnaRow();

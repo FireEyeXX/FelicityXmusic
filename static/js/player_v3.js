@@ -118,6 +118,17 @@ function _levelGainFor(lufs) {
   return Math.min(1, g);
 }
 
+/**
+ * Live-apply settings that affect already-playing audio. Only the active deck's
+ * LUFS level gain — so a `ms_dj_level_target` change is audible immediately.
+ * Selection knobs (tempo/key/energy/etc.) are read fresh on the next advance, so
+ * they need no action here. No-op safe when no AudioContext/deck exists yet.
+ */
+export function applyDjSettings() {
+  if (!_ctx || !_activeLevel()) return;
+  _activeLevel().gain.value = _levelGainFor(_outDjData?.lufs);
+}
+
 function _ensureAudioContext() {
   if (_ctx) return;
   const _AC = window.AudioContext || window.webkitAudioContext;
@@ -1203,7 +1214,7 @@ export function saveQueueDebounced() {
 async function saveQueueNow() {
   if (!store.currentUser) return;
   try {
-    await apiJson('/api/player/queue', {
+    return await apiJson('/api/player/queue', {
       method: 'PUT',
       body: {
         queue: store.playerQueue,
@@ -1214,6 +1225,14 @@ async function saveQueueNow() {
       },
     });
   } catch {}
+}
+
+// Synchronous (awaitable) flush of the pending queue save — cancels the debounce
+// timer and performs the PUT immediately. Used before engine-switch reloads so
+// recent queue/position changes are persisted to the server before unload.
+export async function flushQueue() {
+  clearTimeout(store.playerSaveTimer);
+  return saveQueueNow();
 }
 
 export async function loadQueueState() {

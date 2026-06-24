@@ -581,14 +581,6 @@
             <option value="dlna_only">DLNA Only (cast to receiver)</option>
           </select>
         </div>
-        <div class="setting-group">
-          <label class="setting-label">Player Engine</label>
-          <select class="setting-select" id="settingPlayerEngine">
-            <option value="classic">Classic</option>
-            <option value="crossfade">Crossfade (Web Audio API)</option>
-            <option value="dj">DJ Player (3-band EQ transitions)</option>
-          </select>
-        </div>
         <div class="setting-group classic-only" style="display:none;">
           <label class="setting-label">Prefetch</label>
           <select class="setting-select" id="settingPrefetchEnabled">
@@ -609,140 +601,313 @@
       </div>
     </details>
 
-    <details class="setting-section" id="djModeSection" style="display:none;">
-      <summary class="setting-section-title">DJ Mode</summary>
+    <details class="setting-section" id="djModeSection">
+      <summary class="setting-section-title">Player &amp; DJ</summary>
       <div class="setting-section-body">
-        <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
-          DJ-quality transitions between tracks. The crossfade player analyzes BPM, musical key, and beat positions to create smooth, beat-matched transitions — like a real DJ.
-        </p>
+
+        <!-- ── Engine (always visible) ── -->
         <div class="setting-group">
-          <label class="setting-label">Crossfade Length (beats)</label>
-          <select class="setting-select" id="settingDjCrossfadeBeats">
-            <option value="8">8 beats (2 bars) — tight, punchy transitions</option>
-            <option value="16" selected>16 beats (4 bars) — standard DJ blend</option>
-            <option value="32">32 beats (8 bars) — long atmospheric blend</option>
+          <label class="setting-label">Player Engine</label>
+          <select class="setting-select" id="settingPlayerEngine">
+            <option value="classic">Classic</option>
+            <option value="crossfade">Crossfade (Web Audio API)</option>
+            <option value="dj">DJ Player (3-band EQ transitions)</option>
           </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">How many beats both tracks overlap. At 85 BPM: 8 beats = ~5.6s, 16 beats = ~11.3s, 32 beats = ~22.6s</p>
+          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">DJ adds EQ/filter transitions; changing reloads the app.</p>
         </div>
-        <div class="setting-group">
-          <label class="setting-label">Crossfade Fallback (seconds)</label>
-          <input class="setting-input" id="settingDjCrossfadeSec" type="number" min="2" max="20" value="5">
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">When BPM/beat grid is not yet analyzed, this fixed duration is used instead</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Intro Skip</label>
-          <select class="setting-select" id="settingDjIntroSkip">
-            <option value="0">Off — play from the very start</option>
-            <option value="auto" selected>Auto — skip silence/intro, start at first beat</option>
-            <option value="15">Skip first 15 seconds</option>
-            <option value="30">Skip first 30 seconds</option>
-            <option value="60">Skip first 60 seconds</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Many tracks have slow intros that don't mix well. Auto uses beat analysis to find where the rhythm starts.</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Tempo Match</label>
-          <select class="setting-select" id="settingDjTempoRange">
-            <option value="0">Off — no speed adjustment</option>
-            <option value="4">±4% — very subtle, barely noticeable</option>
-            <option value="8" selected>±8% — standard DJ range</option>
-            <option value="12">±12% — aggressive, may be audible on vocals</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Adjusts the incoming track's speed to match the outgoing BPM during crossfade. After the transition, speed gradually returns to normal over ~10 seconds. Pitch is preserved (no chipmunk effect).</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Transition Style</label>
-          <select class="setting-select" id="settingDjTransitionStyle">
-            <option value="auto" selected>Auto — choose based on musical key</option>
-            <option value="eq_swap">EQ Swap — staged 3-band DJ transition with bass swap</option>
-            <option value="filter_sweep">Filter Sweep — HPF/LPF sweep transition</option>
-            <option value="blend">Blend — smooth equal-power crossfade</option>
-            <option value="drop_cut">Drop Cut — quick filter intro + hard cut</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Auto analyzes the Camelot wheel position of both tracks: Blend for harmonically matching keys (same key or relative major/minor), Bass Swap for nearby keys (±1-2 on the wheel), Quick Cut for clashing keys to avoid dissonance.</p>
-        </div>
-        <div class="setting-group">
+        <div class="setting-group dj-cf-only" style="display:none;">
           <label class="setting-label">Smart Queue</label>
           <select class="setting-select" id="settingDjSmartQueue">
             <option value="off" selected>Off — play queue in order</option>
             <option value="bpm">BPM Match — pick next track with closest BPM</option>
             <option value="bpm_key">BPM + Key — closest BPM with harmonic compatibility</option>
           </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Instead of playing tracks sequentially, picks the best next track from the remaining queue based on BPM similarity (and optionally harmonic key). Only considers tracks that have been analyzed — unanalyzed tracks play in order. Does not reorder the queue.</p>
+          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Picks the best next track from the remaining queue by BPM similarity (and optionally harmonic key). Only considers analyzed tracks. Does not reorder the queue.</p>
         </div>
-        <div class="setting-group">
-          <label class="setting-label">Outro Skip</label>
-          <select class="setting-select" id="settingDjOutroSkip">
-            <option value="0">Off — crossfade before actual track end</option>
-            <option value="auto" selected>Auto — detect where rhythm fades, skip quiet endings</option>
-            <option value="15">Skip last 15 seconds</option>
-            <option value="30">Skip last 30 seconds</option>
-            <option value="60">Skip last 60 seconds</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Detects where the beat stops and starts the crossfade there, skipping quiet endings, spoken outros, and fade-outs. Auto uses beat analysis to find where the rhythm breaks down.</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Outro Fade</label>
-          <select class="setting-select" id="settingDjOutroFade">
-            <option value="0">Off — outgoing track stops abruptly after crossfade</option>
-            <option value="1" selected>On — outgoing track fades out smoothly</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">When the crossfade ends, the outgoing track can either stop immediately or fade out its remaining audio gracefully.</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Prefetch Tracks</label>
-          <select class="setting-select" id="settingDjPrefetchCount">
-            <option value="1">1 track ahead</option>
-            <option value="3" selected>3 tracks ahead</option>
-            <option value="5">5 tracks ahead</option>
-            <option value="10">10 tracks ahead</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Number of upcoming tracks to pre-download for instant crossfade. More = smoother transitions but uses more memory and data. Audio is cached as blob URLs in browser memory.</p>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Pre-analyze Tracks</label>
-          <select class="setting-select" id="settingDjPreAnalyze">
-            <option value="3">3 tracks ahead</option>
-            <option value="5">5 tracks ahead</option>
-            <option value="10" selected>10 tracks ahead</option>
-            <option value="20">20 tracks ahead</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Number of upcoming tracks to analyze for BPM, key, and beat grid. More = better Smart Queue picks but more server load. Tracks with existing tags are instant.</p>
-        </div>
-        <div class="setting-group dj-v3-only" style="display:none;">
-          <label class="setting-label">Bass Swap Point</label>
-          <select class="setting-select" id="settingDjBassSwapPoint">
-            <option value="25">25% — early swap, long blend out</option>
-            <option value="40">40% — slightly early</option>
-            <option value="50" selected>50% — midpoint (classic DJ swap)</option>
-            <option value="60">60% — slightly late</option>
-            <option value="75">75% — late swap, long blend in</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Where in the transition the bass frequencies hard-swap between tracks. Snaps to the nearest beat. Only used with EQ Swap transition style.</p>
-        </div>
-        <div class="setting-group dj-v3-only" style="display:none;">
-          <label class="setting-label">EQ Kill Depth</label>
-          <select class="setting-select" id="settingDjEqKillDepth">
-            <option value="24">-24 dB — gentle (some bleed)</option>
-            <option value="30">-30 dB — moderate</option>
-            <option value="36" selected>-36 dB — deep (near-silent)</option>
-            <option value="48">-48 dB — extreme (true kill)</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">How aggressively EQ bands are cut during EQ Swap transitions. -36 dB is effectively inaudible against the other deck.</p>
-        </div>
-        <div class="setting-group dj-v3-only" style="display:none;">
-          <label class="setting-label">Filter Resonance</label>
-          <select class="setting-select" id="settingDjFilterResonance">
-            <option value="0.5">0.5 — flat (no resonance peak)</option>
-            <option value="1">1.0 — subtle</option>
-            <option value="2" selected>2.0 — moderate (classic sweep sound)</option>
-            <option value="4">4.0 — aggressive (pronounced peak)</option>
-            <option value="8">8.0 — extreme (acid/rave sound)</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Q factor for the filter sweep transition. Higher values create a resonant peak at the cutoff frequency, adding character to the sweep.</p>
-        </div>
-        <button class="btn-save" id="saveDjSettings" style="margin-top:4px;">Save DJ Settings</button>
         <span class="save-status" id="djSaveStatus"></span>
+
+        <!-- ── Transitions ── -->
+        <div class="dj-cf-only" style="display:none;">
+          <h4 style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin:20px 0 12px;">Transitions</h4>
+          <div class="setting-group">
+            <label class="setting-label">Crossfade Length (beats)</label>
+            <select class="setting-select" id="settingDjCrossfadeBeats">
+              <option value="8">8 beats (2 bars) — tight, punchy transitions</option>
+              <option value="16" selected>16 beats (4 bars) — standard DJ blend</option>
+              <option value="32">32 beats (8 bars) — long atmospheric blend</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Crossfade Fallback</label>
+            <div class="setting-range-row">
+              <input class="setting-range" id="settingDjCrossfadeSec" type="range" min="2" max="20" step="1" value="5">
+              <span class="setting-range-val" id="valDjCrossfadeSec">5s</span>
+            </div>
+            <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Used when BPM/beat grid is not yet analyzed.</p>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Transition Style</label>
+            <select class="setting-select" id="settingDjTransitionStyle">
+              <option value="auto" selected>Auto — choose based on musical key</option>
+              <option value="eq_swap">EQ Swap — staged 3-band DJ transition with bass swap</option>
+              <option value="filter_sweep">Filter Sweep — HPF/LPF sweep transition</option>
+              <option value="blend">Blend — smooth equal-power crossfade</option>
+              <option value="drop_cut">Drop Cut — quick filter intro + hard cut</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Intro Skip</label>
+            <select class="setting-select" id="settingDjIntroSkip">
+              <option value="0">Off — play from the very start</option>
+              <option value="auto" selected>Auto — skip silence/intro, start at first beat</option>
+              <option value="15">Skip first 15 seconds</option>
+              <option value="30">Skip first 30 seconds</option>
+              <option value="60">Skip first 60 seconds</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Outro Skip</label>
+            <select class="setting-select" id="settingDjOutroSkip">
+              <option value="0">Off — crossfade before actual track end</option>
+              <option value="auto" selected>Auto — detect where rhythm fades, skip quiet endings</option>
+              <option value="15">Skip last 15 seconds</option>
+              <option value="30">Skip last 30 seconds</option>
+              <option value="60">Skip last 60 seconds</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-toggle">
+              <input type="checkbox" id="settingDjOutroFade" checked>
+              <span class="switch"></span>
+              <span>Outro fade — outgoing track fades out smoothly</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- ── Tempo flow (Advanced) ── -->
+        <details class="setting-section dj-cf-only" style="display:none;margin:16px 0 0;">
+          <summary class="setting-section-title" style="font-size:13px;">Advanced — tempo flow</summary>
+          <div class="setting-section-body">
+            <div class="setting-group">
+              <label class="setting-label">Tempo Match</label>
+              <select class="setting-select" id="settingDjTempoRange">
+                <option value="0">Off — no speed adjustment</option>
+                <option value="4">±4% — very subtle</option>
+                <option value="8" selected>±8% — standard DJ range</option>
+                <option value="12">±12% — aggressive</option>
+              </select>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Tempo Band</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjTempoBand" type="range" min="0" max="20" step="1" value="8">
+                <span class="setting-range-val" id="valDjTempoBand">8</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Out-of-band Penalty</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjTempoOobPenalty" type="range" min="0" max="10" step="1" value="3">
+                <span class="setting-range-val" id="valDjTempoOobPenalty">3</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">In-band Bonus</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjInbandBonus" type="range" min="0" max="10" step="1" value="2">
+                <span class="setting-range-val" id="valDjInbandBonus">2</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">BPM Confidence Floor</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjBpmConfFloor" type="range" min="0" max="1" step="0.05" value="0">
+                <span class="setting-range-val" id="valDjBpmConfFloor">0</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Tempo Arc Ramp</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjTempoRamp" type="range" min="0" max="5" step="1" value="1">
+                <span class="setting-range-val" id="valDjTempoRamp">1</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Tempo Arc Peak</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjTempoPeak" type="range" min="0" max="30" step="1" value="12">
+                <span class="setting-range-val" id="valDjTempoPeak">12</span>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Energy (Advanced) ── -->
+        <details class="setting-section dj-cf-only" style="display:none;margin:16px 0 0;">
+          <summary class="setting-section-title" style="font-size:13px;">Advanced — energy arc</summary>
+          <div class="setting-section-body">
+            <div class="setting-group">
+              <label class="setting-label">Energy Weight</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjEnergyWeight" type="range" min="0" max="30" step="1" value="10">
+                <span class="setting-range-val" id="valDjEnergyWeight">10</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Energy Ramp</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjEnergyRamp" type="range" min="0" max="0.1" step="0.005" value="0.0375">
+                <span class="setting-range-val" id="valDjEnergyRamp">0.0375</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Energy Peak</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjEnergyPeak" type="range" min="0" max="1" step="0.05" value="0.30">
+                <span class="setting-range-val" id="valDjEnergyPeak">0.30</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Energy Peak-at (track #)</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjEnergyPeakAt" type="range" min="1" max="20" step="1" value="8">
+                <span class="setting-range-val" id="valDjEnergyPeakAt">8</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Energy Cooldown</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjEnergyCooldown" type="range" min="0" max="0.1" step="0.005" value="0.02">
+                <span class="setting-range-val" id="valDjEnergyCooldown">0.02</span>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Harmony (Advanced) ── -->
+        <details class="setting-section dj-cf-only" style="display:none;margin:16px 0 0;">
+          <summary class="setting-section-title" style="font-size:13px;">Advanced — harmony</summary>
+          <div class="setting-section-body">
+            <div class="setting-group">
+              <label class="setting-label">Key Weight</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjKeyWeight" type="range" min="0" max="20" step="1" value="6">
+                <span class="setting-range-val" id="valDjKeyWeight">6</span>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Variety (Advanced) ── -->
+        <details class="setting-section dj-cf-only" style="display:none;margin:16px 0 0;">
+          <summary class="setting-section-title" style="font-size:13px;">Advanced — variety</summary>
+          <div class="setting-section-body">
+            <div class="setting-group">
+              <label class="setting-label">Artist Diversity</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjArtistDiversity" type="range" min="0" max="20" step="1" value="6">
+                <span class="setting-range-val" id="valDjArtistDiversity">6</span>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Artist Window</label>
+              <div class="setting-range-row">
+                <input class="setting-range" id="settingDjArtistWindow" type="range" min="0" max="10" step="1" value="3">
+                <span class="setting-range-val" id="valDjArtistWindow">3</span>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── EQ & Filters (dj only) ── -->
+        <div class="dj-v3-only" style="display:none;">
+          <h4 style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin:20px 0 12px;">EQ &amp; Filters</h4>
+          <div class="setting-group">
+            <label class="setting-label">Bass Swap Point</label>
+            <select class="setting-select" id="settingDjBassSwapPoint">
+              <option value="25">25% — early swap, long blend out</option>
+              <option value="40">40% — slightly early</option>
+              <option value="50" selected>50% — midpoint (classic DJ swap)</option>
+              <option value="60">60% — slightly late</option>
+              <option value="75">75% — late swap, long blend in</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">EQ Kill Depth</label>
+            <select class="setting-select" id="settingDjEqKillDepth">
+              <option value="24">-24 dB — gentle (some bleed)</option>
+              <option value="30">-30 dB — moderate</option>
+              <option value="36" selected>-36 dB — deep (near-silent)</option>
+              <option value="48">-48 dB — extreme (true kill)</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Filter Resonance</label>
+            <select class="setting-select" id="settingDjFilterResonance">
+              <option value="0.5">0.5 — flat (no resonance peak)</option>
+              <option value="1">1.0 — subtle</option>
+              <option value="2" selected>2.0 — moderate (classic sweep sound)</option>
+              <option value="4">4.0 — aggressive (pronounced peak)</option>
+              <option value="8">8.0 — extreme (acid/rave sound)</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Tempo Return Floor</label>
+            <div class="setting-range-row">
+              <input class="setting-range" id="settingDjRateReturnMin" type="range" min="5" max="60" step="1" value="15">
+              <span class="setting-range-val" id="valDjRateReturnMin">15s</span>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Tempo Return Scale</label>
+            <div class="setting-range-row">
+              <input class="setting-range" id="settingDjRateReturnScale" type="range" min="100" max="800" step="10" value="400">
+              <span class="setting-range-val" id="valDjRateReturnScale">400</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Loudness (Advanced) ── -->
+        <details class="setting-section dj-cf-only" style="display:none;margin:16px 0 0;">
+          <summary class="setting-section-title" style="font-size:13px;">Advanced — loudness</summary>
+          <div class="setting-section-body">
+            <div class="setting-group">
+              <label class="setting-toggle">
+                <input type="checkbox" id="settingDjLevelMatch">
+                <span class="switch"></span>
+                <span>Level match — attenuate loud tracks toward a target LUFS</span>
+              </label>
+            </div>
+            <div class="setting-group" id="djLevelTargetRow" style="display:none;">
+              <label class="setting-label">Target LUFS</label>
+              <input class="setting-input" id="settingDjLevelTarget" type="number" min="-30" max="0" step="1" value="-14">
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Buffering ── -->
+        <div class="dj-cf-only" style="display:none;">
+          <h4 style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);margin:20px 0 12px;">Buffering</h4>
+          <div class="setting-group">
+            <label class="setting-label">Prefetch Tracks</label>
+            <select class="setting-select" id="settingDjPrefetchCount">
+              <option value="1">1 track ahead</option>
+              <option value="3" selected>3 tracks ahead</option>
+              <option value="5">5 tracks ahead</option>
+              <option value="10">10 tracks ahead</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label">Pre-analyze Tracks</label>
+            <select class="setting-select" id="settingDjPreAnalyze">
+              <option value="3">3 tracks ahead</option>
+              <option value="5">5 tracks ahead</option>
+              <option value="10" selected>10 tracks ahead</option>
+              <option value="20">20 tracks ahead</option>
+            </select>
+          </div>
+        </div>
+
       </div>
     </details>
 

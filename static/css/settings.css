@@ -172,3 +172,48 @@
 .disk-usage-subs.open { display: block; }
 .disk-usage-subs .disk-usage-row { padding: 6px 0; }
 .disk-usage-subs .disk-usage-name { font-weight: 500; font-size: 13px; color: var(--text-muted); }
+
+/* ── Range slider with live value badge ── */
+.setting-range-row {
+  display: flex; align-items: center; gap: 12px;
+}
+.setting-range {
+  flex: 1; -webkit-appearance: none; appearance: none;
+  height: 5px; border-radius: 3px; background: var(--border);
+  outline: none; cursor: pointer; margin: 0;
+}
+.setting-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; border: none;
+  transition: box-shadow var(--transition);
+}
+.setting-range::-webkit-slider-thumb:hover { box-shadow: 0 0 0 4px var(--accent-dim); }
+.setting-range::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; border: none;
+}
+.setting-range-val {
+  min-width: 48px; text-align: center; font-size: 13px; font-weight: 600;
+  color: var(--accent); background: var(--accent-dim);
+  padding: 4px 8px; border-radius: 8px; white-space: nowrap;
+}
+
+/* ── Toggle switch (matches .perm-check accent) ── */
+.setting-toggle {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  font-size: 14px; color: var(--text);
+}
+.setting-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.setting-toggle .switch {
+  position: relative; flex-shrink: 0;
+  width: 40px; height: 22px; border-radius: 22px;
+  background: var(--border); transition: background var(--transition);
+}
+.setting-toggle .switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--text-dim); transition: transform var(--transition), background var(--transition);
+}
+.setting-toggle input:checked + .switch { background: var(--accent-dim); }
+.setting-toggle input:checked + .switch::after { transform: translateX(18px); background: var(--accent); }
