@@ -57,6 +57,13 @@ let _expectedSrcA = '';
 let _expectedSrcB = '';
 let _crossfadeTriggered = false;
 
+// Fix 4 safety net: set by the `ended` handler when a track ended WITHOUT the auto trigger
+// having fired and no crossfade in progress. Forces _loadAndPlayImpl down its crossfade
+// branch (instead of the cold-start hard swap a paused/ended deck would otherwise take) so
+// the next track eases in with a short blend rather than a bare silent cut. One-shot:
+// consumed (cleared) at the top of _loadAndPlayImpl.
+let _endedBlend = false;
+
 // Single in-flight latch for ALL advance entrypoints (auto/ended/error/user/nextTrack).
 // loadAndPlay→deck-swap is async while timeupdate/ended keep firing, so without this a
 // SECOND advance can fire before the first swaps the active deck → double advance /
@@ -541,6 +548,8 @@ async function _loadAndPlayImpl() {
   // Abort prefetch downloads — current track gets all bandwidth
   abortPrefetch();
   _crossfadeTriggered = false;
+  const endedBlend = _endedBlend; // Fix 4: consume the one-shot blend-on-ended request
+  _endedBlend = false;
   // Stop any virtual rec playback — we're back in the real queue
   import('./recommendations.js').then(m => m.stopRecPlayback());
   _currentRecItem = null; // clear stale rec so "Add to playlist" targets the queue track
@@ -585,7 +594,11 @@ async function _loadAndPlayImpl() {
     const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
 
     const currentDeck = _activeDeckEl();
-    if (!currentDeck.paused && currentDeck.src) {
+    // Fix 4: a track that ended WITHOUT firing the auto trigger leaves currentDeck paused
+    // (ended → paused), which would normally take the cold-start hard-swap branch. Honor
+    // _endedBlend to route through the crossfade branch instead so the next track eases in
+    // with a (brief, since the outgoing already ended) blend rather than a silent cut.
+    if ((!currentDeck.paused || endedBlend) && currentDeck.src) {
       // Crossfade: use cache if ready, brief wait if almost done, else stream
       let cached = getCachedUrl(cleanName, cleanArtist, item.id);
       if (!cached) { const w = await waitForCache(cleanName, cleanArtist, 2000, item.id); if (w) cached = w; }
@@ -672,11 +685,17 @@ async function _loadAndPlayImpl() {
         if (_ctx.state === 'suspended') _ctx.resume().then(_rampIn).catch(_rampIn);
         else _rampIn();
       }
-      // Fetch DJ data for current track (needed for crossfade timing)
-      _outDjData = null;
-      fetchDjData(cleanName, cleanArtist).then(d => {
-        if (d) _outDjData = d;
-      }).catch(() => {});
+      // DJ data for current track (needed for crossfade timing). Resolve SYNCHRONOUSLY
+      // from the bpm cache first so the very first timeupdate trigger computes triggerAt
+      // from the real beat-grid lead (~11-16s) instead of falling back to _crossfadeDur()
+      // (~5s) → end-of-track hard cut. _preAnalyzeUpcoming/playing already warm the cache,
+      // so this is usually a hit; the async fetchDjData below is the cache-miss fallback.
+      _outDjData = getDjData(cleanName, cleanArtist) || null;
+      if (!_outDjData) {
+        fetchDjData(cleanName, cleanArtist).then(d => {
+          if (!_outDjData) _outDjData = d;
+        }).catch(() => {});
+      }
       // Cleanup old blob URLs (safe — no crossfade in progress)
       prefetchCleanup(store.playerQueue, store.playerIndex);
     }
@@ -790,7 +809,21 @@ export function nextTrack(opts = {}) {
   // its async loadAndPlay (deck swap not yet done). nextTrack→loadAndPlay is async and
   // timeupdate/ended keep firing, so without this a second advance fires mid-flight →
   // double advance / overlapping crossfades. Cleared inside loadAndPlay after the swap.
-  if (_advanceInFlight) return;
+  if (_advanceInFlight) {
+    // The advance was swallowed — another advance owns the in-flight slot, so NO advance
+    // started here. The auto trigger sets _crossfadeTriggered=true BEFORE calling us; if we
+    // leave it latched, a subsequent timeupdate tick can't retry while `remaining` is still
+    // positive → the outgoing track reaches its real `ended` and hard-cuts. Re-arm the latch
+    // ONLY on the swallowed auto path so the next tick can re-attempt the trigger. Safe from
+    // double-advance: the existing _advanceInFlight guard still blocks the retry until the
+    // current advance releases the slot (loadAndPlay's finally), by which point the new track
+    // is active and `remaining` has reset, so the retry naturally no-ops.
+    if (reason === 'auto') _crossfadeTriggered = false;
+    // The ended-blend intent is moot — another advance already owns the transition.
+    // Clear it so it can't linger and force a stray crossfade branch on a later load.
+    if (reason === 'ended') _endedBlend = false;
+    return;
+  }
   // Throttle only rapid USER skips — never drop ended/auto/error advances (an auto
   // crossfade or ended event must always advance, or the track stalls/never transitions).
   const now = Date.now();
@@ -864,6 +897,7 @@ function _nextTrackInQueue() {
       // (in range, not already played, same track) — avoids re-running pickSmartNext at
       // commit and picking a DIFFERENT track than the one we prefetched (non-gapless).
       let smartIdx = null;
+      const prevPredictedIdx = _predictedNextIdx; // capture before consume (Fix 3 comparison)
       if (_predictedNextIdx != null
           && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length
           && _predictedNextIdx !== store.playerIndex) {
@@ -877,8 +911,20 @@ function _nextTrackInQueue() {
         _inDjData = null;
         smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
       }
+      const wasPredicted = (smartIdx === prevPredictedIdx);
       _predictedNextIdx = null; _predictedNextKey = null; // consume the prediction
       if (smartIdx != null) {
+        // Fix 3: when pickSmartNext recomputed a DIFFERENT index than the one
+        // _preAnalyzeUpcoming prefetched, warm the COMMITTED track's cache now so
+        // loadAndPlay's crossfade takes the fast cached branch instead of the slow
+        // uncached _waitForCanPlay path (during which the outgoing track ends → hard cut).
+        if (!wasPredicted) {
+          const committed = store.playerQueue[smartIdx];
+          if (committed) {
+            resumePrefetch(); // ensure prefetch isn't paused in smart mode
+            prefetchTrack(_decodeEntities(committed.name || ''), _decodeEntities(committed.artist || ''), committed.id);
+          }
+        }
         markPlayed(store.playerQueue[store.playerIndex]); // pickSmartNext is side-effect-free; mark outgoing item on real advance
         store.playerIndex = smartIdx;
         loadAndPlay();
@@ -1243,11 +1289,24 @@ export function init() {
   // Both decks need ended/error handlers
   [_deckA, _deckB].forEach(deck => {
     deck.addEventListener('ended', () => {
+      // Existing double-advance guard: an in-progress crossfade (_crossfading) or an
+      // already-fired auto trigger (_crossfadeTriggered) is ALREADY handling the advance —
+      // don't fire a second one. _advanceInFlight is covered by nextTrack's own latch.
       if (deck !== _activeDeckEl() || _crossfading || _crossfadeTriggered || !deck.src) return;
       if (store.repeatMode === 'one') {
         deck.currentTime = 0;
         deck.play().catch(() => {});
       } else {
+        // Fix 4 safety net: this `ended` slipped through WITHOUT the auto crossfade having
+        // fired (the trigger missed — e.g. _outDjData was null at the trigger window, or the
+        // advance was swallowed). A bare nextTrack here would hard-cut. Request a blend so the
+        // next track eases in instead of a silent cut. Only when a real next track can be
+        // produced and we're not casting (cast has its own advance path).
+        const hasNext = store.playerIndex < store.playerQueue.length - 1
+          || store.repeatMode === 'all'
+          || store.radioMode
+          || _djSetting('smart_queue', 'off') !== 'off';
+        if (hasNext && !store.castDevice) _endedBlend = true;
         nextTrack({ reason: 'ended' });
       }
     });

@@ -507,10 +507,23 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
   if (!currentDjData || !currentDjData.bpm) return null;
 
   // ---- Scoring tunables (BPM-equivalent units) ----
-  const TRUST_FLOOR = 0.5;   // below this confidence, treat candidate BPM as UNKNOWN
+  // Confidence-weighted unified scoring: every eligible unplayed track is a first-class
+  // candidate. BPM distance is weighted by the track's confidence, so tempo only "leads"
+  // for confident tracks; for the low-confidence majority (a zouk library where ~64% of
+  // tracks carry conf 0.3) energy + harmony — the reliable axes — decide the pick.
+  const TRUST_FLOOR = 0.5;   // at/above this confidence, a track is "trusted" (BPM reliable)
   const BAND = parseFloat(_djSetting('dj_tempo_band', '8')) || 8; // preferred tempo window
-  const CONF_PENALTY = 8;   // BPM-equiv cost for full uncertainty: (1 - conf) * CONF_PENALTY
   const JITTER = 1.5;       // small deterministic tie-break (BPM-equiv) so the set has variety
+
+  // NaN-safe numeric setting parse (mirrors the dj_key_weight / dj_tempo_* guards below).
+  const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
+  // Floor added to conf when weighting BPM distance, so even low-conf BPM keeps a tiny
+  // minimum weight. Default 0 = pure confidence weighting (low-conf BPM barely counts).
+  const BPM_CONF_FLOOR = Math.max(0, Math.min(1, num(_djSetting('dj_bpm_conf_floor', '0'), 0)));
+  // In-band bonus (BPM-equiv) for TRUSTED in-band candidates only: confident tempo matches
+  // are still preferred among the confident, WITHOUT hard-filtering to in-band (that starved
+  // the untrusted majority). Untrusted tracks ignore the band entirely.
+  const INBAND_BONUS = num(_djSetting('dj_inband_bonus', '2'), 2);
 
   // Tunable enhancement weights (default ON with musical values).
   const RAMP_PER_TRACK = parseFloat(_djSetting('dj_tempo_ramp', '1')); // BPM/track; 0 = flat
@@ -520,13 +533,14 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
   const _ad = parseFloat(_djSetting('dj_artist_diversity', '6'));
   const ARTIST_DIVERSITY = Number.isFinite(_ad) ? _ad : 6; // 0 disables; NaN→default
 
-  // NaN-safe numeric setting parse (mirrors the dj_key_weight / dj_tempo_* guards above).
-  const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
   const E_RAMP   = num(_djSetting('dj_energy_ramp','0.0375'), 0.0375); // energy/track during warm-up (peak/peak_at → apex at E_PEAKAT)
   const E_PEAK   = num(_djSetting('dj_energy_peak','0.30'), 0.30);    // max above start
   const E_PEAKAT = parseInt(_djSetting('dj_energy_peak_at','8'),10) || 8; // track # of apex
   const E_COOL   = num(_djSetting('dj_energy_cooldown','0.02'), 0.02);// decline/track after peak
-  const E_WEIGHT = num(_djSetting('dj_energy_weight','6'), 6);        // BPM-equiv weight of energy distance
+  // BPM-equiv weight of energy distance. Raised from 6→10: energy dist is 0..1, so ×10 makes
+  // it comparable to a ~10-BPM tempo gap, letting energy meaningfully drive the low-conf
+  // majority whose BPM barely counts under confidence weighting.
+  const E_WEIGHT = num(_djSetting('dj_energy_weight','10'), 10);      // BPM-equiv weight of energy distance
 
   const curBpm = currentDjData.bpm;
   const curCamelot = currentDjData.camelot;
@@ -594,9 +608,15 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     return (a && _recentArtists.indexOf(a) !== -1) ? ARTIST_DIVERSITY : 0;
   };
 
-  // Collect eligible trusted candidates, tracking in-band membership.
-  const trusted = []; // { idx, score, inBand }
-  let untrustedPool = false; // any eligible candidate at all with unknown/low-conf BPM
+  // ---- Unified, confidence-weighted scoring over ALL eligible unplayed candidates ----
+  // Single pass: no trusted-pool / fallback split. Every unplayed, non-current track competes
+  // on the SAME score. BPM distance is weighted by confidence so it leads only for confident
+  // tracks; energy + harmony carry the low-conf majority. `firstUnplayedIdx` is retained as a
+  // last-resort target so we never dead-end while unplayed tracks remain (whole-queue coverage).
+  let firstUnplayedIdx = null;
+  let anyEligible = false;     // any eligible candidate at all (played-set / repeat-all aware)
+  let bestIdx = null;
+  let bestScore = Infinity;
 
   for (let i = 0; i < queue.length; i++) {
     if (i === currentIndex) continue;
@@ -604,14 +624,29 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     const key = _trackKey(item);
     // Skip already-played tracks, unless repeat=all and EVERYTHING has been played.
     if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
+    anyEligible = true;
+    if (firstUnplayedIdx == null) firstUnplayedIdx = i;
 
     // Decode entities before lookup so a title/artist with an HTML entity resolves
     // its DJ data (bpm.js keys the cache under entity-decoded values via _key).
-    const data = getDjData(_djDecode(item.name), _djDecode(item.artist));
-    if (!data || !data.bpm) { untrustedPool = true; continue; }
+    const data = getDjData(_djDecode(item.name), _djDecode(item.artist)) || {};
 
-    const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
-    if (conf < TRUST_FLOOR) { untrustedPool = true; continue; }
+    // conf drives BPM weighting: high-conf → BPM matters fully; low-conf → BPM barely counts.
+    const conf = Number.isFinite(data.confidence) ? data.confidence : 0.3;
+    // BPM distance: absent BPM → BAND (a neutral, in-band-edge gap) so missing BPM neither
+    // attracts nor strongly repels — energy/key then decide. No NaN can enter.
+    const bpmDist = Number.isFinite(data.bpm) ? Math.abs(data.bpm - target) : BAND;
+    // KEY CHANGE: weight BPM distance by (confidence + floor, capped at 1). Low-conf BPM is
+    // discounted (×~0.3) so tempo no longer dominates the 64% low-conf majority.
+    const bpmTerm = bpmDist * Math.min(1, conf + BPM_CONF_FLOOR);
+
+    const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
+
+    // In-band bonus applies ONLY to TRUSTED candidates with a real BPM: keep confident tempo
+    // matches preferred among the confident, without hard-filtering (which starved the
+    // untrusted majority). Untrusted / BPM-less tracks ignore the band.
+    const inBandBonus = (conf >= TRUST_FLOOR && Number.isFinite(data.bpm) && bpmDist <= BAND)
+      ? INBAND_BONUS : 0;
 
     // Deterministic per-track jitter (NOT Math.random): pickSmartNext runs once at
     // prediction time (to prefetch) and again at commit; a re-rolled random term would
@@ -619,34 +654,24 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // the track key (salted per-set so each set differs) gives variety while staying
     // identical across calls WITHIN a set (the salt is fixed for the set).
     const jitter = _jitterFor(key);
-    const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
-    const score = Math.abs(data.bpm - target)
-      + (1 - conf) * CONF_PENALTY
+
+    // keyBonus + artistPenalty are pure functions of cached data.* / stable per-set state
+    // (both NaN-safe: keyBonus returns 0 without camelot, artistPenalty returns 0/ARTIST_DIVERSITY).
+    const score = bpmTerm
+      + eDist
       - keyBonus(data)
       + artistPenalty(item)
-      + eDist
+      - inBandBonus
       + jitter;
-    const inBand = Math.abs(data.bpm - target) <= BAND;
-    trusted.push({ idx: i, score, inBand });
+
+    if (score < bestScore) { bestScore = score; bestIdx = i; }
   }
 
-  if (trusted.length) {
-    // Prefer in-band trusted candidates; if none, consider all trusted.
-    // B. Harmonic weighting is folded into `score` via keyBonus (KEY_WEIGHT BPM of pull for
-    // a blend, half for bass_swap), so a key-compatible in-band track already out-scores a
-    // key-clashing one within ~KEY_WEIGHT BPM of tempo — without letting key override a large
-    // tempo gap (keyBonus is bounded). Final pick is the strict score minimum, which keeps the
-    // per-set jitter (E) effective for breaking genuine ties.
-    const inBand = trusted.filter(c => c.inBand);
-    const pool = inBand.length ? inBand : trusted;
-    let best = pool[0];
-    for (const c of pool) if (c.score < best.score) best = c;
-    return best.idx;
-  }
+  if (bestIdx != null) return bestIdx;
 
-  // ---- Fallback: no trusted candidate. ----
-  // If repeat=all and everything has been played, clear history and retry.
-  if (repeatAll && allPlayed && !untrustedPool) {
+  // ---- No eligible candidate scored. ----
+  // If repeat=all and everything has been played, clear history and retry (recursion-guarded).
+  if (repeatAll && allPlayed && !anyEligible) {
     // Guard against infinite recursion when there is nothing to cycle to (e.g. queue
     // edited down to a single already-played track). Without this, clearing + re-adding
     // the current key leaves allPlayed true with zero candidates → unbounded recursion.
@@ -657,36 +682,10 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     return pickSmartNext(queue, currentIndex, currentDjData, mode, repeatAll);
   }
 
-  // D. Graceful low-confidence fallback. Instead of "first unplayed in array order", score
-  // ALL unplayed candidates by RAW BPM distance to target using whatever BPM is cached
-  // (even confidence 0.3), with a HEAVIER uncertainty penalty than the trusted pool — so
-  // even low-confidence tracks stay near-tempo. A 0.3-conf near-target track beats a random
-  // far-tempo one. Final fallback to first-unplayed when NO candidate has any cached BPM.
-  const LOW_CONF_PENALTY = CONF_PENALTY * 2; // heavier uncertainty cost in the loose pool
-  let firstUnplayedIdx = null;
-  let bestLowIdx = null;
-  let bestLowScore = Infinity;
-  for (let i = 0; i < queue.length; i++) {
-    if (i === currentIndex) continue;
-    const item = queue[i];
-    const key = _trackKey(item);
-    if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
-    if (firstUnplayedIdx == null) firstUnplayedIdx = i;
-
-    const data = getDjData(_djDecode(item.name), _djDecode(item.artist));
-    if (!data || !data.bpm) continue; // no cached BPM at all → not scoreable here
-    const conf = (Number.isFinite(data.confidence) ? data.confidence : 0.3);
-    const jitter = _jitterFor(key);
-    const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
-    const score = Math.abs(data.bpm - target)
-      + (1 - conf) * LOW_CONF_PENALTY
-      - keyBonus(data)
-      + artistPenalty(item)
-      + eDist
-      + jitter;
-    if (score < bestLowScore) { bestLowScore = score; bestLowIdx = i; }
-  }
-  return bestLowIdx != null ? bestLowIdx : firstUnplayedIdx;
+  // Whole-queue coverage: never dead-end while an unplayed track remains. bestIdx is only
+  // null here if the (single) eligible candidate produced no finite score, which cannot
+  // happen (score is always finite), but firstUnplayedIdx is a defensive last resort.
+  return firstUnplayedIdx;
 }
 
 /**
