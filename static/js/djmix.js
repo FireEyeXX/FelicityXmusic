@@ -198,6 +198,25 @@ export function findCrossfadeStartBeat(beatGrid, beforeTime, numBeats = 16) {
 }
 
 /**
+ * Find the bar/phrase-aligned downbeat ~numBars bars before a reference point.
+ * Same shape as findCrossfadeStartBeat but operates over absolute downbeat
+ * (bar-start) times so the crossfade STARTS on a bar/phrase boundary.
+ *
+ * @param {number[]} downbeats  - Sorted array of bar-start times (seconds)
+ * @param {number}   beforeTime - Reference point (e.g. effective end of track)
+ * @param {number}   numBars    - How many bars before (default 4 = one phrase in 4/4)
+ * @returns {number|null} Downbeat time at which to start the crossfade, or null
+ *                        when no downbeat data is available (caller falls back).
+ */
+export function findCrossfadeStartDownbeat(downbeats, beforeTime, numBars = 4) {
+  if (!downbeats || downbeats.length === 0) return null;
+
+  const barsBeforeEnd = downbeats.filter(b => b < beforeTime);
+  const idx = barsBeforeEnd.length - numBars;
+  return idx >= 0 ? barsBeforeEnd[idx] : barsBeforeEnd[0] || 0;
+}
+
+/**
  * Calculate the start offset for the incoming track so its first beat
  * aligns with the outgoing track's beat grid during crossfade.
  *
@@ -309,8 +328,12 @@ export function scheduleDjTransition(ctx, outDeck, inDeck, outData, inData, opts
     const inBeatPeriod = 60 / (inBpm * inRate);
     // Find where we are in the outgoing beat cycle (0..1)
     const outPhase = (outCurrentTime % outBeatPeriod) / outBeatPeriod;
-    // Find a start position in the incoming track where the beat phase matches
-    const firstInBeat = inData.intro_end || inData.beat_grid[0] || 0;
+    // Find a start position in the incoming track where the beat phase matches.
+    // Bar/phrase-align on the first incoming DOWNBEAT when available; else fall
+    // back to intro_end / first beat (unchanged behavior).
+    const firstInBeat = (inData.downbeats && inData.downbeats.length > 0)
+      ? inData.downbeats[0]
+      : (inData.intro_end || inData.beat_grid[0] || 0);
     // Start from firstInBeat, then offset by the phase difference
     const phaseOffset = outPhase * inBeatPeriod;
     inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
@@ -520,6 +543,12 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
   // Floor added to conf when weighting BPM distance, so even low-conf BPM keeps a tiny
   // minimum weight. Default 0 = pure confidence weighting (low-conf BPM barely counts).
   const BPM_CONF_FLOOR = Math.max(0, Math.min(1, num(_djSetting('dj_bpm_conf_floor', '0'), 0)));
+  // Tempo-CONTINUITY penalty (BPM-equiv per BPM beyond the band), applied to ALL candidates
+  // REGARDLESS of confidence. This is the hard "no slow↔fast jump" guard a dance floor needs:
+  // for a dancer, tempo continuity outranks energy/harmony, so even a low-confidence track
+  // whose (octave-folded) BPM is far from the current tempo gets heavily penalized — energy/key
+  // then choose only AMONG tempo-compatible tracks. (BPM-less tracks get bpmDist=BAND → 0 penalty.)
+  const OOB_PENALTY = num(_djSetting('dj_tempo_oob_penalty', '3'), 3);
   // In-band bonus (BPM-equiv) for TRUSTED in-band candidates only: confident tempo matches
   // are still preferred among the confident, WITHOUT hard-filtering to in-band (that starved
   // the untrusted majority). Untrusted tracks ignore the band entirely.
@@ -639,6 +668,11 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // KEY CHANGE: weight BPM distance by (confidence + floor, capped at 1). Low-conf BPM is
     // discounted (×~0.3) so tempo no longer dominates the 64% low-conf majority.
     const bpmTerm = bpmDist * Math.min(1, conf + BPM_CONF_FLOOR);
+    // Tempo-continuity: hard-ish penalty for tempo OUTSIDE the band, applied to EVERY track
+    // (not confidence-scaled) so the set never jumps slow↔fast — even low-conf tracks must
+    // stay near the current (octave-folded) tempo. Zero inside the band, so energy/harmony
+    // freely decide among tempo-compatible candidates.
+    const tempoContinuity = Math.max(0, bpmDist - BAND) * OOB_PENALTY;
 
     const eDist = Number.isFinite(data.energy) ? Math.abs(data.energy - targetEnergy) * E_WEIGHT : 0;
 
@@ -658,6 +692,7 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // keyBonus + artistPenalty are pure functions of cached data.* / stable per-set state
     // (both NaN-safe: keyBonus returns 0 without camelot, artistPenalty returns 0/ARTIST_DIVERSITY).
     const score = bpmTerm
+      + tempoContinuity
       + eDist
       - keyBonus(data)
       + artistPenalty(item)
@@ -814,7 +849,12 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
     const outBeatPeriod = 60 / (outBpm * outRate);
     const inBeatPeriod = 60 / (inBpm * inRate);
     const outPhase = (outCurrentTime % outBeatPeriod) / outBeatPeriod;
-    const firstInBeat = inData.intro_end || inData.beat_grid[0] || 0;
+    // Bar/phrase-align the incoming deck: when downbeat data exists, anchor on the
+    // first incoming DOWNBEAT so the new track's bar 1 lands on the outgoing bar.
+    // Fall back to intro_end / first beat when downbeats are absent (unchanged).
+    const firstInBeat = (inData.downbeats && inData.downbeats.length > 0)
+      ? inData.downbeats[0]
+      : (inData.intro_end || inData.beat_grid[0] || 0);
     const phaseOffset = outPhase * inBeatPeriod;
     inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
     if (inStartTime < 0) inStartTime += inBeatPeriod;

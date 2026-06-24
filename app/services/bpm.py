@@ -21,7 +21,7 @@ BPM_CACHE_FILE = DATA_DIR / "bpm_analysis.json"
 
 ZOUK_MIN_BPM = 60       # fold window spans exactly one octave (60–120 = 2×) → no dead zone
 ZOUK_MAX_BPM = 120
-BPM_ALGO_VERSION = 3    # bump to invalidate cached/tagged BPM when the algorithm changes
+BPM_ALGO_VERSION = 5    # bump to invalidate cached/tagged BPM when the algorithm changes
 FEATURE_VERSION = 1     # bump to lazily backfill audio features (energy/danceability/…) — NEVER triggers a BPM re-scan
 
 # ── Audio-feature normalization anchors (fixed references → reproducible 0..1, NOT dataset-relative) ──
@@ -45,7 +45,7 @@ def clamp01(x: float) -> float:
 # Dance-band fold center: zouk is danced ~82 BPM (half-time). Env-overridable.
 _DANCE_CENTER = float(os.environ.get("BPM_DANCE_CENTER", "82"))
 # Number of evenly-spaced analysis windows across the track body.
-_BPM_SEGMENTS = int(os.environ.get("BPM_SEGMENTS", "3"))
+_BPM_SEGMENTS = int(os.environ.get("BPM_SEGMENTS", "5"))
 
 CAMELOT_MAP = {
     "A minor": "8A", "E minor": "9A", "B minor": "10A", "F# minor": "11A",
@@ -105,6 +105,124 @@ def normalize_bpm(bpm: float, min_bpm: float = ZOUK_MIN_BPM, max_bpm: float = ZO
     return round(bpm, 2)
 
 
+# Octave bounds for snap-to-prior search (well outside the dance band so a doubled
+# detector reading is reachable without saturating at any cap).
+_SNAP_MIN_BPM = 30.0
+_SNAP_MAX_BPM = 240.0
+
+
+def snap_to_prior(bpm: float, prior: float = _DANCE_CENTER) -> float:
+    """Deterministically snap a detected tempo to the octave multiple (÷4…×4, kept inside
+    [30, 240]) that minimizes log-distance to the zouk dance prior (~82 BPM).
+
+    This REPLACES the per-detector seam fold used to compute confidence agreement. The
+    seam fold (`normalize_bpm`) folds into a single octave around a hard boundary, so a
+    detector that doubles to ~160 (or saturates at a 120 cap) lands on the far side of
+    the seam from honest ~80 detectors → a manufactured ~20 BPM disagreement. Snapping to
+    the prior instead places every candidate on the SAME octave as the prior, so
+    cap-collision and seam-straddle stop fabricating disagreement.
+
+    Anchor-safety: for any single value the snap is monotone toward the prior octave, so a
+    value already in the prior's octave is unchanged; a clean single cluster therefore
+    keeps its BPM (verified: 0 flips on clean clusters)."""
+    if bpm <= 0 or prior <= 0:
+        return bpm
+    best = None
+    best_dist = None
+    # Octave multiples ÷4, ÷2, ×1, ×2, ×4.
+    for mult in (0.25, 0.5, 1.0, 2.0, 4.0):
+        cand = bpm * mult
+        if cand < _SNAP_MIN_BPM or cand > _SNAP_MAX_BPM:
+            continue
+        dist = abs(np.log2(cand / prior))
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = cand
+    if best is None:
+        return round(float(bpm), 2)
+    return round(float(best), 2)
+
+
+def _grid_regularity(beat_times) -> float:
+    """Grid-regularity gate: 1.0 when the beat grid is metronomic (inter-beat-interval
+    coefficient of variation < 2%), scaling down toward 0 for irregular grids. Multiplies
+    into the confidence score so genuinely irregular tracks cannot earn false-high
+    confidence. Returns 1.0 (neutral) when there are too few beats to judge."""
+    try:
+        if beat_times is None or len(beat_times) < 4:
+            return 1.0
+        ibis = np.diff(np.asarray(beat_times, dtype=float))
+        ibis = ibis[ibis > 0]
+        if len(ibis) < 3:
+            return 1.0
+        # CRITICAL: beat_times here is intro (0-30s) + outro (last 60s) beats concatenated,
+        # so there is a HUGE gap interval between the two segments (the whole song body).
+        # Raw-diff CV would be dominated by that single gap (and by dropped-beat double
+        # intervals) → CV blows up → grid_reg floors at 0.3 for EVERY track. Keep only IBIs
+        # near the median beat period (±50%) so CV reflects within-segment metronome
+        # steadiness, not the segment boundary.
+        med = float(np.median(ibis))
+        if med <= 0:
+            return 1.0
+        near = ibis[(ibis >= 0.5 * med) & (ibis <= 1.5 * med)]
+        if len(near) < 3:
+            return 1.0
+        mean_ibi = float(np.mean(near))
+        if mean_ibi <= 0:
+            return 1.0
+        cv = float(np.std(near)) / mean_ibi
+        if cv < 0.02:
+            return 1.0
+        # Linear roll-off: CV 2% → 1.0, CV 12% → 0.5, CV ≥ 22% → 0.3 floor.
+        reg = 1.0 - (cv - 0.02) * 5.0
+        return float(max(0.3, min(1.0, reg)))
+    except Exception:
+        return 1.0
+
+
+# ── Integrated loudness (LUFS) for cross-track level matching ──
+
+def _compute_lufs(data_44k_seg):
+    """Integrated loudness (LUFS) + loudness range (LU) for an already-loaded 44.1kHz
+    window, via essentia LoudnessEBUR128 (pyloudnorm is absent). Accepts mono or stereo:
+    mono is duplicated to 2ch (EBU R128 expects interleaved stereo float32). Deterministic.
+    Fully graceful: any failure → last-resort K-weighted-ish RMS approximation, then
+    (None, None) if even that fails. Never aborts BPM.
+
+    Returns (integrated_lufs, loudness_range) rounded to 1 decimal, or (None, None)."""
+    try:
+        seg = np.asarray(data_44k_seg, dtype=np.float32)
+        if seg.size == 0:
+            return None, None
+        if seg.ndim == 1:
+            stereo = np.column_stack([seg, seg]).astype(np.float32)
+        else:
+            # Use first two channels; duplicate if only one present.
+            if seg.shape[1] >= 2:
+                stereo = seg[:, :2].astype(np.float32)
+            else:
+                col = seg[:, 0]
+                stereo = np.column_stack([col, col]).astype(np.float32)
+        stereo = np.ascontiguousarray(stereo, dtype=np.float32)
+        try:
+            import essentia.standard as es
+            # LoudnessEBUR128 returns (momentary, shortTerm, integrated, loudnessRange).
+            _mom, _short, integrated, lrange = es.LoudnessEBUR128(sampleRate=44100)(stereo)
+            return round(float(integrated), 1), round(float(lrange), 1)
+        except Exception as e:
+            logger.warning("LoudnessEBUR128 failed, using RMS approximation: %s", e)
+            # Last-resort approximation: simple un-gated RMS in LUFS-like units.
+            mono = np.mean(stereo, axis=1)
+            ms = float(np.mean(np.square(mono)))
+            if ms <= 0:
+                return None, None
+            approx = -0.691 + 10.0 * np.log10(ms)
+            return round(float(approx), 1), None
+    except Exception as e:
+        logger.warning("LUFS computation failed: %s", e)
+        return None, None
+
+
 # ── Analysis (runs in thread, C extensions release GIL) ──
 
 def _window_features(mono_44k_seg, onset_env, sr: int = 44100) -> dict:
@@ -139,13 +257,19 @@ def _read_window(file_path: str, start_sec: float, len_sec: float):
     return mono, data
 
 
-def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
-    """Run the librosa + essentia detectors on a single window.
-    Returns (raw_values_dict, beat_positions_rel, detected_key_or_None, key_strength_or_None, features_dict)."""
+def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool, want_madmom: bool = False):
+    """Run the librosa + essentia (+ optional madmom) detectors on a single window.
+    `want_key` is retained for signature compatibility but KEY IS NOW DETECTED ON EVERY
+    WINDOW (~0.16s/window) for multi-window voting.
+    Returns (raw_values_dict, beat_positions_rel, detected_key_or_None, key_strength_or_None,
+    features_dict, downbeats_rel_or_None, time_signature_or_None). Downbeats/time_signature
+    are populated only on the mid (`want_madmom`) window; (None, None) otherwise."""
     import librosa
     raw = {}
     features = None
     key_strength = None
+    downbeats_rel = None
+    time_signature = None
 
     # ── librosa (hop_length=512 → 2× faster, minimal accuracy loss) ──
     HOP = 512
@@ -188,19 +312,65 @@ def _detect_window(mono_44k_seg, data_44k_seg, want_key: bool):
             method="multifeature", maxTempo=120, minTempo=55,
         )(audio_es)
         raw["essentia_rhythm"] = round(float(rbpm), 1)
-        if want_key:
-            try:
-                key_name, scale, strength = es.KeyExtractor()(audio_es)
-                detected_key = f"{key_name} {scale}"
-                key_strength = float(strength)
-            except Exception as e:
-                logger.warning("Key detection failed: %s", e)
-                detected_key = None
+        # KEY on EVERY window (~0.16s) → multi-window modal voting + real key_confidence.
+        try:
+            key_name, scale, strength = es.KeyExtractor()(audio_es)
+            detected_key = f"{key_name} {scale}"
+            key_strength = float(strength)
+        except Exception as e:
+            logger.warning("Key detection failed: %s", e)
+            detected_key = None
         del audio_es
     except ImportError:
         detected_key = None
 
-    return raw, beat_positions_rel, detected_key, key_strength, features
+    # ── madmom RNN downbeat tracker (5th detector + downbeats/bars) ──
+    # SINGLE RNN pass on the mid window only (want_madmom). The DBNDownBeatTrackingProcessor
+    # emits an Nx2 array of (time, position-in-bar) covering EVERY beat, so the 5th-detector
+    # beat-BPM ("madmom_rnn") is DERIVED from all beat times here — no separate RNNBeat+DBNBeat
+    # pass is needed (saves ≈5.7s/track). Downbeats are rows where pos==1; time signature is
+    # the modal bar length (beats between successive downbeats). Deterministic given fixed
+    # input (no RNG). Absence/empty output degrades gracefully → no madmom_rnn vote (the other
+    # 4 detectors carry) and (downbeats, time_signature) = (None, None). Never aborts.
+    if want_madmom:
+        try:
+            import madmom
+            from madmom.audio.signal import Signal as _DBSignal
+
+            db_signal = _DBSignal(mono_44k_seg.astype(np.float32), sample_rate=44100)
+            db_rnn = madmom.features.downbeats.RNNDownBeatProcessor()
+            db_act = db_rnn(db_signal)
+            db_proc = madmom.features.downbeats.DBNDownBeatTrackingProcessor(
+                beats_per_bar=[4, 3], fps=100, min_bpm=55, max_bpm=120,
+            )
+            db_beats = db_proc(db_act)  # shape (N, 2): [time, beat_pos_in_bar]
+            if db_beats is not None and len(db_beats) > 1:
+                # 5th-detector beat-BPM derived from ALL beats (every row is a beat).
+                all_beat_times = [t for t, pos in db_beats]
+                if len(all_beat_times) > 1:
+                    raw["madmom_rnn"] = round(
+                        float(60.0 / np.median(np.diff(all_beat_times))), 1)
+                # Downbeats (pos==1) + modal-bar-length time signature.
+                dbs = [round(float(t), 3) for t, pos in db_beats if int(round(pos)) == 1]
+                if len(dbs) >= 2:
+                    downbeats_rel = dbs
+                    # Modal bar length = beats between consecutive downbeats.
+                    bar_lengths = []
+                    db_idx = [i for i, (_, pos) in enumerate(db_beats)
+                              if int(round(pos)) == 1]
+                    for a, b in zip(db_idx, db_idx[1:]):
+                        bar_lengths.append(b - a)
+                    if bar_lengths:
+                        ts = max(set(bar_lengths), key=bar_lengths.count)
+                        if ts in (3, 4):
+                            time_signature = ts
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("madmom downbeat tracking failed: %s", e)
+
+    return (raw, beat_positions_rel, detected_key, key_strength, features,
+            downbeats_rel, time_signature)
 
 
 def analyze_bpm(file_path: str) -> dict:
@@ -237,6 +407,7 @@ def analyze_bpm(file_path: str) -> dict:
         starts = dedup
 
     weights = {
+        "madmom_rnn": 4.0,
         "essentia_percival": 3.0, "essentia_rhythm": 2.0,
         "librosa_tempo": 1.5, "librosa_beats": 1.0,
     }
@@ -244,12 +415,16 @@ def analyze_bpm(file_path: str) -> dict:
     mid_idx = len(starts) // 2
     raw = {}
     detected_key = None
-    key_strength = None           # essentia KeyExtractor confidence (mid window)
+    key_strength = None           # mean essentia strength of windows voting the modal key
     beat_positions = []           # absolute beat times from the first window
-    per_window_folded = []        # list of dicts {detector: folded_bpm}
-    within_stds = []              # std of folded detector values within each window
+    per_window_folded = []        # list of dicts {detector: folded_bpm} (seam-fold, for final value)
+    per_window_snapped = []       # list of dicts {detector: snapped_bpm} (prior-snap, for confidence)
     per_window_features = []      # list of {rms, centroid_hz, pulse} raw feature dicts
-    per_window_keys = []          # detected key per window (for cross-window agreement fallback)
+    per_window_keys = []          # (key, strength) per window (for modal key voting)
+    mid_downbeats_rel = None      # mid-window-relative downbeat times (madmom)
+    mid_downbeat_offset = 0.0     # absolute offset of the mid window
+    time_signature = None         # inferred from modal bar length (4/3/None)
+    lufs_stereo_seg = None        # an already-loaded stereo (or mono) window for LUFS
 
     for wi, s in enumerate(starts):
         try:
@@ -258,7 +433,13 @@ def analyze_bpm(file_path: str) -> dict:
                 del mono_seg, data_seg
                 continue
             want_key = (wi == mid_idx)
-            win_raw, bt_rel, win_key, win_key_strength, win_features = _detect_window(mono_seg, data_seg, want_key)
+            want_madmom = (wi == mid_idx)  # madmom is CPU-heavy → one mid window only
+            (win_raw, bt_rel, win_key, win_key_strength, win_features,
+             win_downbeats, win_ts) = _detect_window(
+                mono_seg, data_seg, want_key, want_madmom)
+            # Capture one already-loaded window for LUFS (prefer the stereo mid window).
+            if lufs_stereo_seg is None or wi == mid_idx:
+                lufs_stereo_seg = np.array(data_seg, copy=True)
             del mono_seg, data_seg
         except Exception as e:
             # One bad window must not abort the whole analysis (we run N of them).
@@ -267,21 +448,24 @@ def analyze_bpm(file_path: str) -> dict:
         if win_features:
             per_window_features.append(win_features)
         if win_key:
-            per_window_keys.append(win_key)
-        if want_key and win_key:
-            detected_key = win_key
-            key_strength = win_key_strength
+            per_window_keys.append((win_key, win_key_strength))
+        # Mid-window downbeats / time signature (relative → absolutized later).
+        if wi == mid_idx and win_downbeats:
+            mid_downbeats_rel = win_downbeats
+            mid_downbeat_offset = s
+            time_signature = win_ts
         # First window's beats become the absolute beat_positions / anchor source.
         if wi == 0:
             beat_positions = [round(t + s, 3) for t in bt_rel]
         # Merge raw values with window-index suffix for debugging.
         for k, v in win_raw.items():
             raw[f"{k}_{wi}"] = v
-        # Fold this window's detector values.
+        # Fold this window's detector values (seam fold → final sortable value).
         folded = {k: round(normalize_bpm(v), 2) for k, v in win_raw.items()}
         per_window_folded.append(folded)
-        fvals = list(folded.values())
-        within_stds.append(float(np.std(fvals)) if len(fvals) > 1 else 0.0)
+        # Snap to prior octave (no seam) → agreement basis for confidence.
+        snapped = {k: snap_to_prior(v) for k, v in win_raw.items()}
+        per_window_snapped.append(snapped)
 
     # ── Beat detection for intro/outro (windowed, never whole track) ──
     import librosa
@@ -327,12 +511,33 @@ def analyze_bpm(file_path: str) -> dict:
     if not final_bpm or final_bpm <= 0:
         final_bpm = round(normalize_bpm(85), 2)  # floor — never let beat_period divide by 0
 
-    # ── Two-level confidence: within-window agreement × segment agreement ──
-    within_std_max = max(within_stds) if within_stds else 0.0
-    seg_medians = [float(np.median(list(f.values()))) for f in per_window_folded if f]
-    segment_std = float(np.std(seg_medians)) if len(seg_medians) > 1 else 0.0
-    spread = max(within_std_max, segment_std)
-    confidence = 0.95 if spread < 1 else 0.85 if spread < 2 else 0.70 if spread < 4 else 0.50 if spread < 8 else 0.30
+    # ── Agreement-ratio confidence (prior-snapped values) × grid-regularity gate ──
+    # Pool ALL (window × detector) values, snapped to the prior octave so the seam can no
+    # longer manufacture disagreement. A weighted median anchors the cluster; agree_ratio
+    # is the fraction (by weight) of values within ±4% of that median. One outlier among
+    # 4–5 detectors now costs at most ~one bucket instead of slamming the 0.30 floor.
+    snap_pairs = []
+    for snapped in per_window_snapped:
+        for k, v in snapped.items():
+            snap_pairs.append((v, weights.get(k, 1.0)))
+    if snap_pairs:
+        sp_sorted = sorted(snap_pairs, key=lambda x: x[0])
+        sp_cumw = np.cumsum([w for _, w in sp_sorted])
+        sp_idx = int(np.searchsorted(sp_cumw, sp_cumw[-1] / 2))
+        wmedian = sp_sorted[sp_idx][0]
+        total_w = float(sum(w for _, w in snap_pairs))
+        agree_w = float(sum(w for v, w in snap_pairs
+                            if wmedian > 0 and abs(v - wmedian) / wmedian <= 0.04))
+        agree_ratio = agree_w / total_w if total_w > 0 else 0.0
+    else:
+        agree_ratio = 0.0
+
+    # ── Grid-regularity gate (P4): caps confidence when the beat grid is irregular ──
+    grid_reg = _grid_regularity(full_beats)
+
+    score = agree_ratio * grid_reg
+    confidence = (0.95 if score >= 0.95 else 0.85 if score >= 0.80
+                  else 0.70 if score >= 0.65 else 0.50 if score >= 0.50 else 0.30)
 
     # (Downbeat tie-break intentionally omitted: with single-octave band folding every
     # value already collapses into the same octave, so a downbeat estimate cannot
@@ -365,13 +570,51 @@ def analyze_bpm(file_path: str) -> dict:
                     outro_start = candidate
                 break
 
+    # ── Multi-window KEY voting + real key_confidence ──
+    # Modal key across all windows that returned one; key_confidence = agreement fraction ×
+    # mean strength of the windows that voted the modal key. Same field names as before
+    # (key, camelot, key_confidence) → frontend unchanged. Graceful fallback to 0.5.
+    from collections import Counter
+    if per_window_keys:
+        n_windows = len(per_window_keys)
+        key_counts = Counter(k for k, _ in per_window_keys)
+        modal_key, modal_count = key_counts.most_common(1)[0]
+        agree_frac = modal_count / n_windows
+        modal_strengths = [s for k, s in per_window_keys
+                           if k == modal_key and s is not None]
+        mean_strength = float(np.mean(modal_strengths)) if modal_strengths else 0.5
+        detected_key = modal_key
+        key_strength = mean_strength
+        key_confidence_value = clamp01(agree_frac * mean_strength)
+    else:
+        detected_key = None
+        key_strength = None
+        key_confidence_value = 0.5
+
     # ── Key / Camelot ──
     camelot = CAMELOT_MAP.get(detected_key) if detected_key else None
+
+    # ── Downbeats: absolutize mid-window downbeats, then extrapolate a full-track grid ──
+    # (mirror the beat_grid reconstruction): bar_period = beat_period × (time_signature or 4),
+    # first downbeat anchors the grid. Graceful: empty list when madmom produced nothing.
+    downbeats = []
+    if mid_downbeats_rel:
+        abs_downbeats = [round(t + mid_downbeat_offset, 3) for t in mid_downbeats_rel]
+        first_db = abs_downbeats[0]
+        bar_period = beat_period * (time_signature or 4)
+        if bar_period > 0:
+            n_bars = int((track_duration - first_db) / bar_period) + 1
+            downbeats = [round(first_db + i * bar_period, 3) for i in range(max(0, n_bars))]
+
+    # ── Integrated loudness (LUFS) for level matching (≈0.2s, additive/graceful) ──
+    lufs, loudness_range = _compute_lufs(lufs_stereo_seg) if lufs_stereo_seg is not None else (None, None)
 
     # ── Audio features (energy/danceability/brightness) + key confidence ──
     # Reproducible, fixed-anchor normalization (NOT dataset-relative). Fully additive:
     # any failure degrades to neutral 0.5 and never affects BPM/key/camelot/beat_grid.
-    features = _aggregate_features(per_window_features, key_strength, per_window_keys)
+    # key_confidence is now the multi-window vote (above), not the single-strength path; pass
+    # [] for keys so _aggregate_features computes only energy/danceability/brightness.
+    features = _aggregate_features(per_window_features, None, [])
 
     return {
         "bpm": round(final_bpm, 1), "confidence": confidence,
@@ -382,11 +625,15 @@ def analyze_bpm(file_path: str) -> dict:
         "camelot": camelot,
         "intro_end": intro_end,
         "outro_start": outro_start,
+        "downbeats": downbeats,
+        "time_signature": time_signature,
+        "lufs": lufs,
+        "loudness_range": loudness_range,
         "algo_version": BPM_ALGO_VERSION,
         "energy": features["energy"],
         "danceability": features["danceability"],
         "brightness": features["brightness"],
-        "key_confidence": features["key_confidence"],
+        "key_confidence": round(float(key_confidence_value), 4),
         "feature_version": FEATURE_VERSION,
     }
 
@@ -577,6 +824,62 @@ def read_outro_tag(file_path: str) -> float | None:
     return None
 
 
+def read_downbeat_anchor_tag(file_path: str) -> float | None:
+    """Read the first-downbeat anchor (seconds) from custom tag."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("DOWNBEAT_ANCHOR") or tags.get("downbeat_anchor")
+    if val:
+        try:
+            return float(val[0])
+        except Exception:
+            pass
+    return None
+
+
+def read_time_sig_tag(file_path: str) -> int | None:
+    """Read time signature (beats per bar, 3 or 4) from custom tag."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("TIME_SIG") or tags.get("time_sig")
+    if val:
+        try:
+            return int(float(val[0]))
+        except Exception:
+            pass
+    return None
+
+
+def read_lufs_tag(file_path: str) -> float | None:
+    """Read integrated loudness (LUFS) from custom tag."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("LUFS") or tags.get("lufs")
+    if val:
+        try:
+            return float(val[0])
+        except Exception:
+            pass
+    return None
+
+
+def read_loudness_range_tag(file_path: str) -> float | None:
+    """Read loudness range (LU) from custom tag."""
+    tags, fmt = _open_tags(file_path)
+    if not tags:
+        return None
+    val = tags.get("LOUDNESS_RANGE") or tags.get("loudness_range")
+    if val:
+        try:
+            return float(val[0])
+        except Exception:
+            pass
+    return None
+
+
 def read_algover_tag(file_path: str) -> int | None:
     """Read the BPM algorithm version the file was last analyzed with."""
     tags, fmt = _open_tags(file_path)
@@ -638,7 +941,9 @@ def write_tags(file_path: str, bpm: int = None, key: str = None,
                outro_start: float = None, algo_ver: int = None,
                energy: float = None, danceability: float = None,
                brightness: float = None, key_confidence: float = None,
-               feature_ver: int = None):
+               feature_ver: int = None, downbeat_anchor: float = None,
+               time_sig: int = None, lufs: float = None,
+               loudness_range: float = None):
     """Write BPM, key, beat anchor, intro end, outro start, and audio features to file tags.
     Feature tags are ADDITIVE — they never block the BPM tag write."""
     tags, fmt = _open_tags(file_path)
@@ -671,7 +976,9 @@ def write_tags(file_path: str, bpm: int = None, key: str = None,
                 tags["beat_anchor"] = str(round(beat_anchor, 3))
         for tag_name, value in [("INTRO_END", intro_end), ("OUTRO_START", outro_start),
                                 ("ENERGY", energy), ("DANCEABILITY", danceability),
-                                ("BRIGHTNESS", brightness), ("KEY_CONFIDENCE", key_confidence)]:
+                                ("BRIGHTNESS", brightness), ("KEY_CONFIDENCE", key_confidence),
+                                ("DOWNBEAT_ANCHOR", downbeat_anchor), ("LUFS", lufs),
+                                ("LOUDNESS_RANGE", loudness_range), ("TIME_SIG", time_sig)]:
             if value is not None:
                 if fmt == "flac":
                     tags[tag_name] = str(round(value, 3))
@@ -719,6 +1026,23 @@ def _reconstruct_beat_grid(bpm: float, anchor: float, file_path: str) -> tuple[l
     return grid, duration
 
 
+def _reconstruct_downbeats(bpm: float, downbeat_anchor: float, time_sig: int,
+                           duration: float) -> list:
+    """Reconstruct the full-track downbeat grid from bpm + first-downbeat anchor + time
+    signature (parallel to _reconstruct_beat_grid). Returns [] when inputs are missing."""
+    try:
+        if bpm <= 0 or downbeat_anchor is None:
+            return []
+        beat_period = 60.0 / bpm
+        bar_period = beat_period * (time_sig or 4)
+        if bar_period <= 0:
+            return []
+        n_bars = int((duration - downbeat_anchor) / bar_period) + 1
+        return [round(downbeat_anchor + i * bar_period, 3) for i in range(max(0, n_bars))]
+    except Exception:
+        return []
+
+
 def _analyze_or_read_tag(file_path: str) -> dict:
     """Check file tags first, run full analysis if any tag missing."""
     existing_bpm = read_bpm_tag(file_path)
@@ -735,6 +1059,11 @@ def _analyze_or_read_tag(file_path: str) -> dict:
         bpm = float(existing_bpm)
         camelot = CAMELOT_MAP.get(existing_key)
         beat_grid, track_duration = _reconstruct_beat_grid(bpm, existing_anchor, file_path)
+        # Reconstruct downbeats from anchor + time_sig (additive; [] when tags absent).
+        existing_db_anchor = read_downbeat_anchor_tag(file_path)
+        existing_time_sig = read_time_sig_tag(file_path)
+        downbeats = _reconstruct_downbeats(bpm, existing_db_anchor, existing_time_sig,
+                                           track_duration)
         result = {
             "bpm": bpm, "confidence": 1.0,
             "raw": {"tag_bpm": existing_bpm, "tag_key": existing_key},
@@ -743,6 +1072,10 @@ def _analyze_or_read_tag(file_path: str) -> dict:
             "beat_positions": beat_grid, "beat_grid": beat_grid,
             "intro_end": existing_intro,
             "outro_start": existing_outro,
+            "downbeats": downbeats,
+            "time_signature": existing_time_sig,
+            "lufs": read_lufs_tag(file_path),
+            "loudness_range": read_loudness_range_tag(file_path),
             "algo_version": BPM_ALGO_VERSION,
         }
         # Lazy feature backfill — never blocks/breaks the BPM fast path.
@@ -765,6 +1098,8 @@ def _analyze_or_read_tag(file_path: str) -> dict:
     result = analyze_bpm(file_path)
     # Write all tags
     anchor = (result.get("beat_positions") or [None])[0]
+    downbeats_out = result.get("downbeats") or []
+    downbeat_anchor = downbeats_out[0] if downbeats_out else None
     write_tags(file_path,
                bpm=int(round(result["bpm"])),
                key=result.get("key"),
@@ -776,7 +1111,11 @@ def _analyze_or_read_tag(file_path: str) -> dict:
                danceability=result.get("danceability"),
                brightness=result.get("brightness"),
                key_confidence=result.get("key_confidence"),
-               feature_ver=FEATURE_VERSION)
+               feature_ver=FEATURE_VERSION,
+               downbeat_anchor=downbeat_anchor,
+               time_sig=result.get("time_signature"),
+               lufs=result.get("lufs"),
+               loudness_range=result.get("loudness_range"))
     return result
 
 

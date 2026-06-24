@@ -8,7 +8,7 @@ import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
 import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
-import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
+import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, findCrossfadeStartDownbeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
 import { getDjData } from './bpm.js';
 import * as cast from './cast.js';
 
@@ -97,8 +97,24 @@ function _createDeckNodes() {
   high.type = 'highshelf'; high.frequency.value = 3500; high.gain.value = 0;
   const sweep = _ctx.createBiquadFilter();
   sweep.type = 'highpass'; sweep.frequency.value = 20; sweep.Q.value = 0.7;
+  // Per-deck LUFS level-match gain. SEPARATE from the crossfade `gain` (which is
+  // overwritten by setValueCurveAtTime/ramps every transition) so level-matching is
+  // never wiped or double-applied. Set as a plain value once per track load.
+  const levelGain = _ctx.createGain();
   const gain = _ctx.createGain();
-  return { low, mid, high, sweep, gain };
+  return { low, mid, high, sweep, levelGain, gain };
+}
+
+/**
+ * Attenuate-only LUFS level-match gain toward TARGET (-14 LUFS).
+ * Caps at 1.0 so a quiet track stays at unity and is NEVER boosted into the
+ * master limiter. Returns 1 (unchanged behavior) when lufs is absent/non-finite.
+ */
+function _levelGainFor(lufs) {
+  const TARGET = -14;
+  if (!Number.isFinite(lufs)) return 1;
+  const g = Math.pow(10, (TARGET - lufs) / 20);
+  return Math.min(1, g);
 }
 
 function _ensureAudioContext() {
@@ -132,9 +148,10 @@ function _ensureAudioContext() {
   _master.release.value = 0.06;
   _master.connect(_ctx.destination);
 
-  // Chain: source → low → mid → high → sweep → gain → master(limiter) → destination
-  _sourceA.connect(_nodesA.low).connect(_nodesA.mid).connect(_nodesA.high).connect(_nodesA.sweep).connect(_nodesA.gain).connect(_master);
-  _sourceB.connect(_nodesB.low).connect(_nodesB.mid).connect(_nodesB.high).connect(_nodesB.sweep).connect(_nodesB.gain).connect(_master);
+  // Chain: source → low → mid → high → sweep → levelGain → gain → master(limiter) → destination
+  // levelGain (LUFS level-match) sits BEFORE the crossfade gain so the two never interact.
+  _sourceA.connect(_nodesA.low).connect(_nodesA.mid).connect(_nodesA.high).connect(_nodesA.sweep).connect(_nodesA.levelGain).connect(_nodesA.gain).connect(_master);
+  _sourceB.connect(_nodesB.low).connect(_nodesB.mid).connect(_nodesB.high).connect(_nodesB.sweep).connect(_nodesB.levelGain).connect(_nodesB.gain).connect(_master);
 
   _nodesA.gain.gain.value = 1;
   _nodesB.gain.gain.value = 0;
@@ -155,6 +172,8 @@ function _inactiveDeckEl() { return _activeDeck === 'A' ? _deckB : _deckA; }
 function _activeNodes() { return _activeDeck === 'A' ? _nodesA : _nodesB; }
 function _inactiveNodes() { return _activeDeck === 'A' ? _nodesB : _nodesA; }
 function _activeGain() { return _activeNodes().gain; }
+function _activeLevel() { return _activeNodes().levelGain; }
+function _inactiveLevel() { return _inactiveNodes().levelGain; }
 function _inactiveGain() { return _inactiveNodes().gain; }
 
 /** Build deck descriptor object for djmix.js */
@@ -231,6 +250,11 @@ function _startCrossfade(seekable = true) {
   // Swap DJ data so timeupdate uses new track's data for the NEXT crossfade
   _outDjData = _inDjData;
   _inDjData = null;
+
+  // LUFS level-match the INCOMING deck (now the active deck post-swap) BEFORE the fade.
+  // Plain value, never a ramp, so it can't interact with the crossfade gain curve.
+  // Attenuate-only (cap 1.0); 1.0 when lufs absent → identical to today.
+  if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(transInData?.lufs);
 
   // Read DJ settings
   const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
@@ -694,8 +718,12 @@ async function _loadAndPlayImpl() {
       if (!_outDjData) {
         fetchDjData(cleanName, cleanArtist).then(d => {
           if (!_outDjData) _outDjData = d;
+          // Late level-match once data arrives (set plain value, never a ramp).
+          if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(_outDjData?.lufs);
         }).catch(() => {});
       }
+      // LUFS level-match on the active deck (attenuate-only, cap 1.0; 1.0 when absent).
+      if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(_outDjData?.lufs);
       // Cleanup old blob URLs (safe — no crossfade in progress)
       prefetchCleanup(store.playerQueue, store.playerIndex);
     }
@@ -1062,6 +1090,8 @@ export async function playRecTrack(item) {
         _activeGain().gain.cancelScheduledValues(0);
         _activeGain().gain.value = 1;
       }
+      // Rec track has no analyzed LUFS → reset level-match to unity (no carryover).
+      if (_activeLevel()) _activeLevel().gain.value = 1;
     }
   }
   showPlayerBar();
@@ -1418,7 +1448,16 @@ export function init() {
           if (triggerAt > dur * 0.25 || triggerAt > 30) triggerAt = _crossfadeDur();
         } else if (_outDjData && _outDjData.beat_grid && _outDjData.bpm) {
           const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
-          const startBeat = findCrossfadeStartBeat(_outDjData.beat_grid, effectiveEnd, numBeats);
+          // Prefer bar/phrase-aligned start when downbeat data exists so the fade STARTS
+          // on a bar boundary; fall back to the beat grid (identical to today) otherwise.
+          let startBeat = null;
+          if (_outDjData.downbeats && _outDjData.downbeats.length > 0) {
+            const numBars = Math.max(1, Math.round(numBeats / 4));
+            startBeat = findCrossfadeStartDownbeat(_outDjData.downbeats, effectiveEnd, numBars);
+          }
+          if (startBeat == null) {
+            startBeat = findCrossfadeStartBeat(_outDjData.beat_grid, effectiveEnd, numBeats);
+          }
           triggerAt = effectiveEnd - startBeat;
           // Clamp: never trigger earlier than 25% from end, max 30s
           if (triggerAt > dur * 0.25 || triggerAt > 30) triggerAt = _crossfadeDur();

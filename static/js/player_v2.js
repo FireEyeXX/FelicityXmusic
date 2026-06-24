@@ -20,6 +20,7 @@ document.body.appendChild(_deckB);
 
 let _ctx = null;
 let _gainA = null, _gainB = null;
+let _levelA = null, _levelB = null; // per-deck LUFS level-match (separate from crossfade gain)
 let _sourceA = null, _sourceB = null;
 // EQ filters for bass swap transitions
 let _lowA = null, _lowB = null;
@@ -51,6 +52,12 @@ function _ensureAudioContext() {
   _gainA = _ctx.createGain();
   _gainB = _ctx.createGain();
 
+  // Per-deck LUFS level-match gain, SEPARATE from the crossfade gain (which is overwritten
+  // every transition). There is NO master limiter on this path, so the level-match helper is
+  // attenuate-only (cap 1.0) — a boost here could clip the destination directly.
+  _levelA = _ctx.createGain();
+  _levelB = _ctx.createGain();
+
   // Bass EQ filters for DJ bass-swap transitions
   _lowA = _ctx.createBiquadFilter();
   _lowA.type = 'lowshelf'; _lowA.frequency.value = 250; _lowA.gain.value = 0;
@@ -60,18 +67,32 @@ function _ensureAudioContext() {
   _sourceA = _ctx.createMediaElementSource(_deckA);
   _sourceB = _ctx.createMediaElementSource(_deckB);
 
-  // Chain: source → lowShelf → gain → destination
-  _sourceA.connect(_lowA).connect(_gainA).connect(_ctx.destination);
-  _sourceB.connect(_lowB).connect(_gainB).connect(_ctx.destination);
+  // Chain: source → lowShelf → levelGain → gain → destination
+  _sourceA.connect(_lowA).connect(_levelA).connect(_gainA).connect(_ctx.destination);
+  _sourceB.connect(_lowB).connect(_levelB).connect(_gainB).connect(_ctx.destination);
 
   _gainA.gain.value = 1;
   _gainB.gain.value = 0;
+}
+
+/**
+ * Attenuate-only LUFS level-match gain toward TARGET (-14 LUFS), cap 1.0.
+ * MANDATORY cap here: this engine has no master limiter, so a boost would clip.
+ * Returns 1 (unchanged behavior) when lufs is absent/non-finite.
+ */
+function _levelGainFor(lufs) {
+  const TARGET = -14;
+  if (!Number.isFinite(lufs)) return 1;
+  const g = Math.pow(10, (TARGET - lufs) / 20);
+  return Math.min(1, g);
 }
 
 function _activeDeckEl() { return _activeDeck === 'A' ? _deckA : _deckB; }
 function _inactiveDeckEl() { return _activeDeck === 'A' ? _deckB : _deckA; }
 function _activeGain() { return _activeDeck === 'A' ? _gainA : _gainB; }
 function _inactiveGain() { return _activeDeck === 'A' ? _gainB : _gainA; }
+function _activeLevel() { return _activeDeck === 'A' ? _levelA : _levelB; }
+function _inactiveLevel() { return _activeDeck === 'A' ? _levelB : _levelA; }
 function _activeLow() { return _activeDeck === 'A' ? _lowA : _lowB; }
 function _inactiveLow() { return _activeDeck === 'A' ? _lowB : _lowA; }
 
@@ -106,6 +127,11 @@ function _startCrossfade(seekable = true) {
   // Swap active deck NOW
   _activeDeck = _activeDeck === 'A' ? 'B' : 'A';
   _crossfading = true;
+
+  // LUFS level-match the INCOMING deck (now the active deck post-swap) BEFORE the fade.
+  // Plain value, never a ramp, so it can't interact with the crossfade gain curve.
+  // Attenuate-only (cap 1.0); 1.0 when lufs absent → identical to today.
+  if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(_inDjData?.lufs);
 
   // Read DJ settings
   const numBeats = parseInt(_djSetting('crossfade_beats', '16')) || 16;
@@ -409,10 +435,14 @@ export async function loadAndPlay() {
         _activeGain().gain.cancelScheduledValues(0);
         _activeGain().gain.value = 1;
       }
+      // LUFS level-match: unity until data arrives (helper returns 1 when absent),
+      // then set the real attenuation once DJ data resolves. Plain value, never a ramp.
+      if (_activeLevel()) _activeLevel().gain.value = 1;
       // Fetch DJ data for current track (needed for crossfade timing)
       _outDjData = null;
       fetchDjData(cleanName, cleanArtist).then(d => {
         if (d) _outDjData = d;
+        if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(_outDjData?.lufs);
       }).catch(() => {});
       // Cleanup old blob URLs (safe — no crossfade in progress)
       prefetchCleanup(store.playerQueue, store.playerIndex);
@@ -672,6 +702,8 @@ export async function playRecTrack(item) {
         _activeGain().gain.cancelScheduledValues(0);
         _activeGain().gain.value = 1;
       }
+      // No analyzed LUFS on this direct-play path → reset level-match to unity (no carryover).
+      if (_activeLevel()) _activeLevel().gain.value = 1;
     }
   }
   showPlayerBar();
