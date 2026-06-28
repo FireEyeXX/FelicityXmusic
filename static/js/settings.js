@@ -225,6 +225,7 @@ function _toggleDjSection() {
 const DJ_CONFIG = {
   // Engine group (cf+dj)
   smart_queue:        { sel: '#settingDjSmartQueue',        def: 'off' },
+  tempo_pref:         { sel: '#settingDjTempoPref',         def: 'auto' },
   // Transitions (cf+dj)
   crossfade_beats:    { sel: '#settingDjCrossfadeBeats',    def: '16' },
   crossfade_sec:      { sel: '#settingDjCrossfadeSec',      def: '5',  badge: '#valDjCrossfadeSec',  fmt: v => v + 's' },

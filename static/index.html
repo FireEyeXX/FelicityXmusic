@@ -501,6 +501,16 @@
           </select>
           <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Picks the best next track from the remaining queue by BPM similarity (and optionally harmonic key). Only considers analyzed tracks. Does not reorder the queue.</p>
         </div>
+        <div class="setting-group dj-cf-only" style="display:none;">
+          <label class="setting-label">Tempo</label>
+          <select class="setting-select" id="settingDjTempoPref">
+            <option value="auto" selected>Auto — any tempo</option>
+            <option value="slow">Slow — under 90 BPM</option>
+            <option value="mid">Mid — 90-110 BPM</option>
+            <option value="fast">Fast — 110+ BPM</option>
+          </select>
+          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Constrains Smart Queue picks to a tempo band. Tracks without a known BPM are skipped while a band is active; if none match, the band is ignored so playback never stalls.</p>
+        </div>
         <span class="save-status" id="djSaveStatus"></span>
 
         <!-- ── Transitions ── -->
@@ -1228,6 +1238,15 @@
           <option value="off">Off — play queue in order</option>
           <option value="bpm">BPM Match — closest BPM</option>
           <option value="bpm_key">BPM + Key — harmonic match</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label" for="fpDjTempoPref">Tempo</label>
+        <select class="setting-select" id="fpDjTempoPref">
+          <option value="auto">Auto — any tempo</option>
+          <option value="slow">Slow — &lt;90 BPM</option>
+          <option value="mid">Mid — 90-110 BPM</option>
+          <option value="fast">Fast — 110+ BPM</option>
         </select>
       </div>
       <div class="setting-group">

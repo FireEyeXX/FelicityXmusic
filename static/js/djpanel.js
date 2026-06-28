@@ -10,6 +10,7 @@
 import { $ } from './utils.js';
 import { getPlayerModule } from './player_active.js';
 import { switchPage } from './router.js';
+import { closeFullPlayer } from './fullplayer.js';
 
 // Curated controls. `key` is the EXACT localStorage suffix after `ms_dj_`
 // (i.e. the literal _djSetting() argument the engine reads).
@@ -17,6 +18,7 @@ import { switchPage } from './router.js';
 // _djSetting('dj_energy_weight') → localStorage key `ms_dj_dj_energy_weight`.
 const PANEL_CONFIG = {
   smart_queue:      { sel: '#fpDjSmartQueue',      def: 'off' },
+  tempo_pref:       { sel: '#fpDjTempoPref',       def: 'auto' },
   crossfade_beats:  { sel: '#fpDjCrossfadeBeats',  def: '16' },
   transition_style: { sel: '#fpDjTransitionStyle', def: 'auto' },
   dj_energy_weight: { sel: '#fpDjEnergyWeight',    def: '10', badge: '#fpValDjEnergyWeight' },
@@ -103,6 +105,10 @@ function toggleDjPanel() {
 // Open Settings and expand+scroll the Playback (DJ) <details> section.
 function openSettingsDjSection() {
   closeDjPanel();
+  // The full player is a fixed full-screen overlay; close it too or the Settings
+  // page switches UNDERNEATH it and stays invisible (this was the "More in Settings
+  // does nothing" bug).
+  try { closeFullPlayer(); } catch (e) {}
   switchPage('settings');
   setTimeout(() => {
     const sec = $('#djModeSection');

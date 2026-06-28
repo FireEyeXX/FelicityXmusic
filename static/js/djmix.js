@@ -658,6 +658,39 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     return (a && _recentArtists.indexOf(a) !== -1) ? ARTIST_DIVERSITY : 0;
   };
 
+  // ---- Live Tempo preference: restrict candidates to a BPM band ----
+  // `ms_dj_tempo_pref`: auto (no constraint) | slow (<90) | mid (90–110) | fast (>110).
+  // Bands match bpm.js presets exactly (Slow <90, Mid 90-110, Fast 110+). The filter is a
+  // PURE, DETERMINISTIC function of the band + each candidate's cached bpm — no state writes,
+  // no randomness — so predict==commit is preserved. We test against getDjData().bpm, the
+  // SAME value the scoring below uses for tempo distance (Math.abs(data.bpm - target)), so the
+  // control is consistent with the engine's own tempo logic. Tracks with no bpm (or no DJ data)
+  // are EXCLUDED when a band is active (can't confirm they match). If the band leaves ZERO
+  // eligible candidates, we silently fall back to the unconstrained set (never stall playback).
+  const tempoPref = _djSetting('tempo_pref', 'auto');
+  const _bandOk = (bpm) => {
+    if (!Number.isFinite(bpm)) return false;
+    if (tempoPref === 'slow') return bpm < 90;
+    if (tempoPref === 'mid')  return bpm >= 90 && bpm <= 110;
+    if (tempoPref === 'fast') return bpm > 110;
+    return true; // 'auto' or unknown value → no constraint
+  };
+  // When a band is active, decide once (deterministically) whether ANY unplayed candidate is
+  // in-band; if none, the band is disabled for this call so we don't dead-end.
+  let _bandActive = tempoPref === 'slow' || tempoPref === 'mid' || tempoPref === 'fast';
+  if (_bandActive) {
+    let anyInBand = false;
+    for (let i = 0; i < queue.length; i++) {
+      if (i === currentIndex) continue;
+      const item = queue[i];
+      const key = _trackKey(item);
+      if (_playedKeys.has(key) && !(repeatAll && allPlayed)) continue;
+      const d = getDjData(_djDecode(item.name), _djDecode(item.artist));
+      if (d && _bandOk(d.bpm)) { anyInBand = true; break; }
+    }
+    if (!anyInBand) _bandActive = false; // empty band → graceful unconstrained fallback (silent)
+  }
+
   // ---- Unified, confidence-weighted scoring over ALL eligible unplayed candidates ----
   // Single pass: no trusted-pool / fallback split. Every unplayed, non-current track competes
   // on the SAME score. BPM distance is weighted by confidence so it leads only for confident
@@ -680,6 +713,11 @@ export function pickSmartNext(queue, currentIndex, currentDjData, mode = 'bpm', 
     // Decode entities before lookup so a title/artist with an HTML entity resolves
     // its DJ data (bpm.js keys the cache under entity-decoded values via _key).
     const data = getDjData(_djDecode(item.name), _djDecode(item.artist)) || {};
+
+    // Live Tempo preference filter: when a band is active (and non-empty), only tracks whose
+    // cached bpm is in the band compete for selection. Pure deterministic skip — no state
+    // writes — so prediction==commit holds. BPM-less tracks fail _bandOk → excluded.
+    if (_bandActive && !_bandOk(data.bpm)) continue;
 
     // conf drives BPM weighting: high-conf → BPM matters fully; low-conf → BPM barely counts.
     const conf = Number.isFinite(data.confidence) ? data.confidence : 0.3;
