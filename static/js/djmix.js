@@ -331,13 +331,34 @@ export function scheduleDjTransition(ctx, outDeck, inDeck, outData, inData, opts
     // Find a start position in the incoming track where the beat phase matches.
     // Bar/phrase-align on the first incoming DOWNBEAT when available; else fall
     // back to intro_end / first beat (unchanged behavior).
-    const firstInBeat = (inData.downbeats && inData.downbeats.length > 0)
-      ? inData.downbeats[0]
-      : (inData.intro_end || inData.beat_grid[0] || 0);
-    // Start from firstInBeat, then offset by the phase difference
-    const phaseOffset = outPhase * inBeatPeriod;
-    inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
-    if (inStartTime < 0) inStartTime += inBeatPeriod; // wrap around
+    //
+    // NOTE: backend anchors downbeats[0] to the MID analysis window (~0.47-0.5x
+    // duration), so it is NOT the first downbeat of the track. The downbeat grid
+    // is periodic at the bar period, so reduce downbeats[0] to its phase-equivalent
+    // downbeat near the START of the track: keeps the SAME beat/bar phase (beat-match
+    // intact) but starts near 0 instead of mid-track.
+    const haveDownbeats = inData.downbeats && inData.downbeats.length > 0;
+    const inBpmValid = Number.isFinite(inBpm) && inBpm > 0;
+    let firstInBeat;
+    if (haveDownbeats && inBpmValid) {
+      const beatsPerBar = inData.time_signature || 4;
+      const barPeriod = inBeatPeriod * beatsPerBar;
+      // First-bar downbeat with the same phase as the grid, in [0, barPeriod).
+      const firstBarStart = inData.downbeats[0] - Math.floor(inData.downbeats[0] / barPeriod) * barPeriod;
+      firstInBeat = firstBarStart;
+      // Start from firstInBeat, then offset by the phase difference
+      const phaseOffset = outPhase * inBeatPeriod;
+      inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
+      if (inStartTime < 0) inStartTime += inBeatPeriod; // wrap around
+      inStartTime = Math.max(inStartTime, 0);
+      // SAFETY CLAMP: never seek past the first two bars (inStartTime < barPeriod
+      // already after the mod reduction, so this only guards against edge cases).
+      inStartTime = Math.min(inStartTime, barPeriod * 2);
+    } else {
+      // Downbeats missing or BPM invalid: preserve any intro-skip already set,
+      // but never allow a garbage negative seek.
+      inStartTime = Math.max(inStartTime, 0);
+    }
   }
   // Seek incoming deck — only if source is seekable (cached blob)
   if (inStartTime > 0 && seekable) {
@@ -851,13 +872,33 @@ export function scheduleDjTransitionV3(ctx, outDeck, inDeck, outData, inData, op
     const outPhase = (outCurrentTime % outBeatPeriod) / outBeatPeriod;
     // Bar/phrase-align the incoming deck: when downbeat data exists, anchor on the
     // first incoming DOWNBEAT so the new track's bar 1 lands on the outgoing bar.
-    // Fall back to intro_end / first beat when downbeats are absent (unchanged).
-    const firstInBeat = (inData.downbeats && inData.downbeats.length > 0)
-      ? inData.downbeats[0]
-      : (inData.intro_end || inData.beat_grid[0] || 0);
-    const phaseOffset = outPhase * inBeatPeriod;
-    inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
-    if (inStartTime < 0) inStartTime += inBeatPeriod;
+    //
+    // NOTE: backend anchors downbeats[0] to the MID analysis window (~0.47-0.5x
+    // duration), so it is NOT the first downbeat of the track. The downbeat grid
+    // is periodic at the bar period, so reduce downbeats[0] to its phase-equivalent
+    // downbeat near the START of the track: keeps the SAME beat/bar phase (beat-match
+    // intact) but starts near 0 instead of mid-track.
+    const haveDownbeats = inData.downbeats && inData.downbeats.length > 0;
+    const inBpmValid = Number.isFinite(inBpm) && inBpm > 0;
+    let firstInBeat;
+    if (haveDownbeats && inBpmValid) {
+      const beatsPerBar = inData.time_signature || 4;
+      const barPeriod = inBeatPeriod * beatsPerBar;
+      // First-bar downbeat with the same phase as the grid, in [0, barPeriod).
+      const firstBarStart = inData.downbeats[0] - Math.floor(inData.downbeats[0] / barPeriod) * barPeriod;
+      firstInBeat = firstBarStart;
+      const phaseOffset = outPhase * inBeatPeriod;
+      inStartTime = Math.max(inStartTime, firstInBeat - phaseOffset);
+      if (inStartTime < 0) inStartTime += inBeatPeriod;
+      inStartTime = Math.max(inStartTime, 0);
+      // SAFETY CLAMP: never seek past the first two bars (inStartTime < barPeriod
+      // already after the mod reduction, so this only guards against edge cases).
+      inStartTime = Math.min(inStartTime, barPeriod * 2);
+    } else {
+      // Downbeats missing or BPM invalid: preserve any intro-skip already set,
+      // but never allow a garbage negative seek.
+      inStartTime = Math.max(inStartTime, 0);
+    }
   }
   if (inStartTime > 0 && seekable) {
     if (inDeck.element.readyState >= 1) {
