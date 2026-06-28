@@ -205,15 +205,90 @@ async function _maybeTopUp() {
   }
 }
 
+// Human-readable seed label for the recs header — "Based on {track/artist}".
+function _seedLabel() {
+  const seed = (_originalSeed && _originalSeed.length)
+    ? _originalSeed[_originalSeed.length - 1]
+    : (store.playerQueue.length ? store.playerQueue[store.playerQueue.length - 1] : null);
+  if (!seed) return 'your queue';
+  if (seed.name && seed.artist) return `${seed.name} — ${seed.artist}`;
+  return seed.name || seed.artist || 'your queue';
+}
+
+function _refreshRecsHeader() {
+  $$('.recs-section').forEach(section => {
+    const lbl = section.querySelector('.recs-seed');
+    if (lbl) lbl.textContent = `Based on ${_seedLabel()}`;
+  });
+}
+
 function _ensureRecsIn(queueListEl) {
   if (!queueListEl) return null;
   let list = queueListEl.querySelector('.recs-list');
   if (list) return list;
   const section = document.createElement('div');
   section.className = 'recs-section';
-  section.innerHTML = `<div class="panel-header" style="font-size:13px;border-top:1px solid var(--border);padding-top:12px;">Recommended</div><div class="recs-list"></div>`;
+  section.innerHTML = `
+    <div class="panel-header recs-header" style="font-size:13px;border-top:1px solid var(--border);padding-top:12px;">
+      <div class="recs-header-titles">
+        <span>Recommended</span>
+        <span class="recs-seed" style="font-size:11px;font-weight:400;color:var(--text-muted);">Based on ${_seedLabel()}</span>
+      </div>
+      <button class="recs-refresh" title="Refresh recommendations" aria-label="Refresh recommendations">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+      </button>
+    </div>
+    <div class="recs-moods" role="group" aria-label="Recommendation mood">
+      <button class="recs-mood active" data-vibe="" title="Default mood">Default</button>
+      <button class="recs-mood" data-vibe="calm" title="Calmer picks">&#127769; Calm</button>
+      <button class="recs-mood" data-vibe="energy" title="Higher energy picks">&#9889; Energy</button>
+    </div>
+    <div class="recs-list"></div>`;
   queueListEl.appendChild(section);
+  // Reconcile chip highlight against the persisted _recsVibe (e.g. the queue
+  // container was wiped by renderQueueInto and the section rebuilt from the
+  // template which hard-codes Default as active).
+  $$('.recs-mood', section).forEach(b => b.classList.toggle('active', (b.dataset.vibe || '') === _recsVibe));
+  _attachHeaderHandlers(section);
   return section.querySelector('.recs-list');
+}
+
+// Currently selected mood/vibe for the recs station ('' = default).
+let _recsVibe = '';
+
+// Seed track for vibe-aware radio — the last track of the original seed (the one
+// the station is "Based on"), falling back to the live queue tail.
+function _vibeSeedTrack() {
+  if (_originalSeed && _originalSeed.length) return _originalSeed[_originalSeed.length - 1];
+  if (store.playerQueue.length) return store.playerQueue[store.playerQueue.length - 1];
+  return null;
+}
+
+function _attachHeaderHandlers(section) {
+  const refresh = section.querySelector('.recs-refresh');
+  if (refresh) refresh.addEventListener('click', (e) => {
+    e.stopPropagation();
+    recsDirty = true;
+    loadRecs();
+  });
+  $$('.recs-mood', section).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _recsVibe = btn.dataset.vibe || '';
+      // Reflect selection across all rendered headers (desktop + mobile).
+      $$('.recs-mood').forEach(b => b.classList.toggle('active', (b.dataset.vibe || '') === _recsVibe));
+      if (_recsVibe) {
+        // Calm/Energy: the virtual-recs endpoint has no vibe axis, so start a
+        // vibe-aware track radio from the seed (backend supports vibe on /radio/track).
+        const seed = _vibeSeedTrack();
+        if (seed) import('./radio.js').then(m => m.startTrackRadio(seed, { vibe: _recsVibe }));
+      } else {
+        // Default: refresh the normal (non-vibe) recommendation station.
+        recsDirty = true;
+        loadRecs();
+      }
+    });
+  });
 }
 
 function _getAllRecsContainers() {
@@ -249,6 +324,7 @@ function _recsHtml() {
         <button class="rec-add-playlist" title="Add to Navidrome playlist" data-rec-idx="${i}">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
         </button>
+        <button class="rec-dismiss" title="Dismiss" aria-label="Dismiss recommendation" data-rec-idx="${i}">&times;</button>
       </div>
     </div>`).join('');
 }
@@ -306,6 +382,16 @@ function _attachRecsHandlers(el) {
       getPlayerModule().then(m => m.addToQueue([track]));
     });
   });
+  // "✕" = dismiss this rec from the station
+  $$('.rec-dismiss', el).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.recIdx);
+      const track = recsCache[idx];
+      dismissRec(idx);
+      if (track) recordSkip(track);
+    });
+  });
   // Playlist icon = add to Navidrome playlist
   $$('.rec-add-playlist', el).forEach(btn => {
     btn.addEventListener('click', async (e) => {
@@ -347,6 +433,7 @@ function renderRecs() {
     el.innerHTML = html;
     _attachRecsHandlers(el);
   });
+  _refreshRecsHeader();
 }
 
 // ── Re-append recs to queue list after queue re-render ──

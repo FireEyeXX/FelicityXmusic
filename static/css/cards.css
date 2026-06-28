@@ -121,3 +121,10 @@
   text-align: center;
 }
 .bpm-range-input:focus { border-color: var(--accent); outline: none; }
+.bpm-lowconf-label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+.bpm-lowconf-label input { cursor: pointer; }
+.bpm-coverage { color: var(--text-dim); font-size: 12px; }
+.bpm-filter-note { color: var(--text-dim); font-size: 12px; font-style: italic; }
+.bpm-filter-disabled .bpm-preset,
+.bpm-filter-disabled .bpm-range-input,
+.bpm-filter-disabled .bpm-lowconf-label { opacity: .45; cursor: not-allowed; }

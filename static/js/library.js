@@ -186,9 +186,10 @@ async function loadLibraryDetail(id) {
     _addSelectListeners();
     _addRemoveButtons(id);
     // BPM: filter bar with scan button, fetch cached BPM, add badges
-    _initBpmFilter(id);
+    const bpmFilter = _initBpmFilter(id);
     fetchPlaylistBpm(id).then(() => {
       addBpmBadges('#libraryTracks');
+      if (bpmFilter && bpmFilter._refreshCoverage) bpmFilter._refreshCoverage();
     });
   } catch (e) {
     tracksEl.innerHTML = `<div class="empty-state"><p>Failed to load playlist</p></div>`;
@@ -534,6 +535,7 @@ function _initBpmFilter(playlistId) {
   addScanButton(filter, playlistId, '#libraryTracks');
   const tracksEl = $('#libraryTracks');
   tracksEl.parentNode.insertBefore(filter, tracksEl);
+  return filter;
 }
 
 export function closeLibraryDetail(fromPopstate) {

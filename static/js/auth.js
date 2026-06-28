@@ -83,8 +83,14 @@ export async function initApp() {
     // Show admin sections
     $('#usersSection').style.display = me.is_admin ? '' : 'none';
     $('#diskUsageSection').style.display = me.is_admin ? '' : 'none';
-    // Show settings save only for admins (others can view)
-    $('#saveSettings').style.display = me.is_admin ? '' : 'none';
+    // Global-settings auto-saves and the credential Save & Test buttons write to
+    // PUT /api/settings (require_admin). Non-admins can view but not save, so hide
+    // the credential Save & Test buttons for them (the auto-save handlers also
+    // short-circuit for non-admins). The Library/Download Sources sections still
+    // render so non-admins can see current values.
+    const adminOnly = me.is_admin ? '' : 'none';
+    const stN = $('#saveTestNavidrome'); if (stN) stN.style.display = adminOnly;
+    const stS = $('#saveTestSlskd'); if (stS) stS.style.display = adminOnly;
 
     // Load defaults
     try {

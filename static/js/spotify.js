@@ -8,6 +8,20 @@ import { renderResults, checkLibrary } from './search.js';
 import { switchPage } from './router.js';
 import { attachContextMenu, wasLongPress } from './contextmenu.js';
 import { getPlayerModule } from './player_active.js';
+import { hydrateBpmByName, addBpmBadges, initTempoFilter } from './bpm.js';
+
+// Bulk-hydrate cached BPM for a freshly-rendered track list, then add badges and
+// mount the (feasibility-aware) tempo filter. Owned-only: unowned tracks get no
+// BPM and the filter disables itself when coverage is too low. allowAnalyze=false
+// since on-demand analysis of unowned Spotify tracks mostly 404s.
+async function _mountTempoFilter(tracks, containerSel) {
+  try {
+    await hydrateBpmByName(tracks);
+    addBpmBadges(containerSel);
+    const filter = initTempoFilter(containerSel, { allowAnalyze: false });
+    if (filter && filter._refreshCoverage) filter._refreshCoverage();
+  } catch {}
+}
 
 // ── Tab Switching ──
 function loadSpTab(tab) {
@@ -169,6 +183,7 @@ export async function loadPlaylistDetail(id, url, fromPage) {
     $('#plDetailName').textContent = data.name;
     $('#plDetailCount').textContent = `${data.tracks.length} tracks`;
     renderResults(data.tracks, '#playlistTracks');
+    _mountTempoFilter(data.tracks, '#playlistTracks');
   } catch (e) {
     tracksEl.innerHTML = `<div class="empty-state"><p>Failed to load tracks</p></div>`;
   }
@@ -341,6 +356,7 @@ export async function loadAlbumDetail(album, fromPage) {
     store.currentAlbumTracks = tracks;
     $('#albumDetailCount').textContent = `${tracks.length} tracks`;
     renderResults(tracks, '#albumTracks');
+    _mountTempoFilter(tracks, '#albumTracks');
   } catch (e) {
     tracksEl.innerHTML = `<div class="empty-state"><p>Failed to load tracks: ${e.message}</p></div>`;
   }
@@ -423,6 +439,17 @@ export function init() {
     const { playTracks } = await import('./upnext.js');
     playTracks(tracks);
   });
+  $('#shuffleAlbum').addEventListener('click', async () => {
+    const tracks = store.currentAlbumTracks || [];
+    if (!tracks.length) return;
+    const shuffled = tracks.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const { playTracks } = await import('./upnext.js');
+    playTracks(shuffled);
+  });
   $('#queueAlbum').addEventListener('click', async () => {
     const tracks = store.currentAlbumTracks || [];
     if (!tracks.length) return;
@@ -472,6 +499,16 @@ export function init() {
     if (tracks.length) {
       import('./upnext.js').then(m => m.playTracks(tracks));
     }
+  });
+  $('#shufflePlaylist').addEventListener('click', () => {
+    const tracks = getPlaylistTracksForPlayer();
+    if (!tracks.length) return;
+    const shuffled = tracks.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    import('./upnext.js').then(m => m.playTracks(shuffled));
   });
   $('#queuePlaylist').addEventListener('click', () => {
     const tracks = getPlaylistTracksForPlayer();

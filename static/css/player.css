@@ -149,6 +149,31 @@ body.player-active .player-bar { display: flex; }
 }
 .rec-add-queue:hover { background: var(--accent); color: #000; border-color: var(--accent); }
 .rec-add-playlist:hover { background: rgba(255,255,255,.1); }
+.rec-dismiss {
+  background: none; border: 1px solid var(--border); color: var(--text-muted);
+  width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; line-height: 1; transition: all .15s;
+}
+.rec-dismiss:hover { background: var(--error, #d33); color: #fff; border-color: var(--error, #d33); }
+
+/* ── Recs header: seed label + refresh + mood chips ── */
+.recs-header.panel-header { align-items: center; }
+.recs-header-titles { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.recs-seed { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recs-refresh {
+  background: none; border: 1px solid var(--border); color: var(--text);
+  width: 30px; height: 30px; border-radius: 50%; cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.recs-refresh:hover { background: var(--accent); color: #000; border-color: var(--accent); }
+.recs-moods { display: flex; gap: 6px; padding: 8px 4px 4px; flex-wrap: wrap; }
+.recs-mood {
+  background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-muted);
+  padding: 4px 12px; border-radius: 14px; font-size: 11px; cursor: pointer; transition: all .15s;
+}
+.recs-mood:hover { color: var(--text); border-color: var(--text-muted); }
+.recs-mood.active { background: var(--accent); color: #000; border-color: var(--accent); }
 
 /* ── Source Badge ── */
 .source-badge { font-size: 9px; font-weight: 700; letter-spacing: .5px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; text-transform: uppercase; line-height: 1.4; }

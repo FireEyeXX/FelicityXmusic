@@ -159,10 +159,10 @@ export function renderQueueInto(el) {
 export function updateSaveButton() {
   const btn = $('#fpSaveQueue');
   if (!btn) return;
-  // Only show the "Save as playlist" button when it will actually work: the
-  // click handler early-returns unless a playlist context is active, so tie
-  // visibility to the same state (a live playlistMode + something to save).
-  const show = !!store.playlistMode && store.playerQueue.length > 0;
+  // Show "Save as playlist" whenever there is something to save. The click
+  // handler promotes an Up Next playlistMode via rename, and otherwise falls
+  // back to creating a fresh Navidrome playlist from the current queue.
+  const show = store.playerQueue.length > 0;
   btn.style.display = show ? '' : 'none';
   btn.textContent = 'Save as playlist';
 }
@@ -306,7 +306,7 @@ export function init() {
   });
   // Save: promote current Up Next to a named playlist, then spawn a fresh Up Next.
   $('#fpSaveQueue').addEventListener('click', async () => {
-    if (!store.playerQueue.length || !store.playlistMode) return;
+    if (!store.playerQueue.length) return;
     const name = prompt('Save as playlist:');
     if (!name || !name.trim()) return;
     const btn = $('#fpSaveQueue');
@@ -314,7 +314,9 @@ export function init() {
     btn.textContent = 'Saving...';
     try {
       const { apiJson } = await import('./api.js');
-      const isUpNext = store.playlistMode.name === 'Up Next';
+      // Promote an existing "Up Next" context via rename; otherwise (no playlist
+      // context, or already a named playlist) create a fresh playlist and copy.
+      const isUpNext = !!store.playlistMode && store.playlistMode.name === 'Up Next';
       if (isUpNext) {
         // Rename Up Next → user's chosen name. The Navidrome playlist sheds the
         // __upnext_ prefix, becoming a regular library entry. Tracks unchanged.

@@ -217,3 +217,39 @@
 }
 .setting-toggle input:checked + .switch { background: var(--accent-dim); }
 .setting-toggle input:checked + .switch::after { transform: translateX(18px); background: var(--accent); }
+
+/* ── Section icon in summary title ── */
+.setting-section-icon {
+  flex-shrink: 0; width: 18px; height: 18px;
+  margin-right: 10px; color: var(--text-muted);
+  vertical-align: middle;
+}
+.setting-section-title:hover .setting-section-icon { color: var(--accent); }
+/* Title text sits between icon and the chevron (::after) */
+.setting-section-title > .setting-section-label { flex: 1; }
+
+/* ── Inline help text (replaces scattered inline styles) ── */
+.setting-help {
+  font-size: 11px; color: var(--text-dim);
+  margin-top: 4px; line-height: 1.4;
+}
+
+/* ── Password reveal (eye) button ── */
+.input-reveal-wrap { position: relative; }
+.input-reveal-wrap .setting-input { padding-right: 44px; }
+.btn-reveal {
+  position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  padding: 6px; display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; transition: color var(--transition);
+}
+.btn-reveal:hover { color: var(--accent); }
+
+/* ── Connection status pill (Save & Test result) ── */
+.conn-status {
+  display: inline-block; font-size: 12px; font-weight: 600;
+  padding: 3px 10px; border-radius: 20px; margin-left: 10px;
+  white-space: nowrap;
+}
+.conn-status.ok { color: var(--accent); background: var(--accent-dim); }
+.conn-status.err { color: var(--red); background: rgba(239,68,68,.12); }

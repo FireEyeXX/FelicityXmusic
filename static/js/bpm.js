@@ -6,6 +6,15 @@ import { apiJson } from './api.js';
 // In-memory BPM cache (artist::name → bpm data)
 const _cache = {};
 
+// Below this confidence a cached BPM is treated as "low confidence". When the
+// "include low-confidence" toggle is OFF, such tracks behave like unknown-BPM
+// for filtering/play purposes. Keep in sync with the DJ engine's expectations.
+const CONF_FLOOR = 0.5;
+
+// Coverage threshold: if more than this fraction of a list's tracks have no
+// known BPM, the tempo controls render disabled (owned-only reality).
+const LOW_COVERAGE_RATIO = 0.8;
+
 /** Fetch cached BPM data for a playlist (no analysis, fast). */
 export async function fetchPlaylistBpm(playlistId) {
   try {
@@ -17,10 +26,69 @@ export async function fetchPlaylistBpm(playlistId) {
   } catch { return null; }
 }
 
+/**
+ * Bulk-hydrate the BPM cache for an arbitrary track list (album / Spotify
+ * playlist / search) in ONE cached-only request — avoids N slow serial calls.
+ * Populates _cache using the same loop as fetchPlaylistBpm. Returns the raw
+ * response or null on failure.
+ */
+export async function hydrateBpmByName(tracks) {
+  if (!tracks || !tracks.length) return null;
+  const payload = tracks
+    .filter(t => t && (!t.type || t.type === 'track'))
+    .map(t => ({ name: t.name || '', artist: t.artist || '' }));
+  if (!payload.length) return null;
+  try {
+    const data = await apiJson('/api/bpm/lookup-by-name', {
+      method: 'POST',
+      body: { tracks: payload },
+    });
+    if (data && data.tracks) {
+      for (const t of data.tracks) _cache[_key(t.name, t.artist)] = t;
+    }
+    return data;
+  } catch { return null; }
+}
+
 /** Get cached BPM for a track. Returns number or null. */
 export function getCachedBpm(name, artist) {
   const entry = _cache[_key(name, artist)];
   return entry ? entry.bpm : null;
+}
+
+/**
+ * BPM usable for filtering. When includeLowConf is false, a cached entry whose
+ * confidence is below CONF_FLOOR is treated as unknown (returns null), so shaky
+ * detections don't silently pollute a tempo subset. Legacy entries without a
+ * confidence field are treated as low-confidence (0) rather than silently trusted.
+ */
+function _effectiveBpm(name, artist, includeLowConf) {
+  const entry = _cache[_key(name, artist)];
+  if (!entry || entry.bpm == null) return null;
+  const conf = entry.confidence == null ? 0 : entry.confidence;
+  if (!includeLowConf && conf < CONF_FLOOR) return null;
+  return entry.bpm;
+}
+
+/**
+ * Coverage stats for a rendered track container.
+ * Returns { total, known, noBpm } where `total` counts only track cards.
+ * `known` respects the include-low-confidence flag (default true).
+ */
+export function coverageSummary(containerId, includeLowConf = true) {
+  const container = typeof containerId === 'string' ? $(containerId) : containerId;
+  let total = 0, known = 0;
+  if (container) {
+    $$('.card', container).forEach(card => {
+      if (!card.dataset.item) return;
+      let item;
+      try { item = JSON.parse(card.dataset.item); } catch { return; }
+      if (item.type && item.type !== 'track') return;
+      total++;
+      if (_effectiveBpm(item.name, item.artist, includeLowConf) != null) known++;
+    });
+  }
+  return { total, known, noBpm: total - known };
 }
 
 /** Get full cached DJ data (bpm, key, camelot, beat_grid). Returns object or null. */
@@ -62,8 +130,15 @@ export function addBpmBadges(container) {
   }
 }
 
-/** Build BPM filter bar. */
-export function createBpmFilter(tracksContainerId) {
+/**
+ * Build BPM filter bar.
+ * @param {string} tracksContainerId  selector for the track-card container.
+ * @param {object} [opts]
+ *   - allowAnalyze {boolean=true}: show the "Analyze" action in the not-analyzed
+ *     toast. Set false for unowned views where on-demand analysis mostly 404s.
+ */
+export function createBpmFilter(tracksContainerId, opts = {}) {
+  const allowAnalyze = opts.allowAnalyze !== false;
   const el = document.createElement('div');
   el.className = 'bpm-filter';
   el.innerHTML = `
@@ -80,21 +155,38 @@ export function createBpmFilter(tracksContainerId) {
     <span class="bpm-filter-sep">|</span>
     <button class="bpm-preset" id="bpmPlayFiltered">&#9654; Play filtered</button>
     <button class="bpm-preset" id="bpmPlayRamp">&#9654; Play slow&rarr;fast</button>
+    <span class="bpm-filter-sep">|</span>
+    <label class="bpm-lowconf-label" title="Include tracks whose BPM detection is low-confidence">
+      <input type="checkbox" id="bpmLowConf" checked> low-conf
+    </label>
+    <span class="bpm-coverage" id="bpmCoverage"></span>
   `;
 
   // Tracks the active bucket so the play buttons know whether to exclude
   // unknown-BPM tracks. "All" (min 0 / max 999) means include everything.
   let _activeMin = 0, _activeMax = 999;
 
+  const _includeLowConf = () => !!el.querySelector('#bpmLowConf').checked;
+
+  const _updateCoverage = () => {
+    const cov = coverageSummary(tracksContainerId, _includeLowConf());
+    const badge = el.querySelector('#bpmCoverage');
+    if (!badge) return;
+    if (!cov.total) { badge.textContent = ''; return; }
+    badge.textContent = `BPM known for ${cov.known}/${cov.total}` +
+      (cov.noBpm ? ` (${cov.noBpm} no BPM)` : '');
+  };
+
   const apply = (min, max) => {
     _activeMin = min; _activeMax = max;
     const container = $(tracksContainerId);
     if (!container) return;
+    const inc = _includeLowConf();
     $$('.card', container).forEach(card => {
       if (!card.dataset.item) return;
       try {
         const item = JSON.parse(card.dataset.item);
-        const bpm = getCachedBpm(item.name, item.artist);
+        const bpm = _effectiveBpm(item.name, item.artist, inc);
         card.style.display = (bpm == null || (bpm >= min && bpm <= max)) ? '' : 'none';
       } catch {}
     });
@@ -126,6 +218,12 @@ export function createBpmFilter(tracksContainerId) {
   el.querySelector('#bpmMin').addEventListener('input', onRange);
   el.querySelector('#bpmMax').addEventListener('input', onRange);
 
+  // Re-apply current filter (low-conf membership may change) + refresh coverage.
+  el.querySelector('#bpmLowConf').addEventListener('change', () => {
+    apply(_activeMin, _activeMax);
+    _updateCoverage();
+  });
+
   // ── Collect the currently-visible (filtered) tracks from the DOM. ──
   const _visibleTracks = () => {
     const container = $(tracksContainerId);
@@ -140,15 +238,18 @@ export function createBpmFilter(tracksContainerId) {
   const _filterActive = () => !(_activeMin <= 0 && _activeMax >= 999);
 
   // Apply the unknown-BPM exclusion policy and surface an Analyze toast for any
-  // tracks that were dropped because they have no cached BPM.
+  // tracks that were dropped because they have no usable (per low-conf) BPM.
   const _applyUnknownPolicy = (tracks) => {
     if (!_filterActive()) return tracks;
+    const inc = _includeLowConf();
     const kept = [], dropped = [];
     for (const t of tracks) {
-      if (getCachedBpm(t.name, t.artist) == null) dropped.push(t); else kept.push(t);
+      if (_effectiveBpm(t.name, t.artist, inc) == null) dropped.push(t); else kept.push(t);
     }
     if (dropped.length) {
-      _showAnalyzeToast(`${dropped.length} tracks not analyzed`, () => _analyzeContainer(tracksContainerId));
+      const msg = `${dropped.length} tracks not analyzed`;
+      if (allowAnalyze) _showAnalyzeToast(msg, () => _analyzeContainer(tracksContainerId));
+      else showToast('BPM only available for tracks in your library');
     }
     return kept;
   };
@@ -161,21 +262,65 @@ export function createBpmFilter(tracksContainerId) {
   });
 
   el.querySelector('#bpmPlayRamp').addEventListener('click', async () => {
-    // Tempo ramp: drop unknown BPM, sort ascending by cached BPM.
+    // Tempo ramp: drop unusable BPM, sort ascending by cached BPM.
+    const inc = _includeLowConf();
     const tracks = _visibleTracks()
-      .map(t => ({ t, bpm: getCachedBpm(t.name, t.artist) }))
+      .map(t => ({ t, bpm: _effectiveBpm(t.name, t.artist, inc) }))
       .filter(x => x.bpm != null)
       .sort((a, b) => a.bpm - b.bpm)
       .map(x => x.t);
     if (!tracks.length) {
-      _showAnalyzeToast('No analyzed tracks to ramp', () => _analyzeContainer(tracksContainerId));
+      if (allowAnalyze) _showAnalyzeToast('No analyzed tracks to ramp', () => _analyzeContainer(tracksContainerId));
+      else showToast('BPM only available for tracks in your library');
       return;
     }
     const u = await import('./upnext.js');
     u.playTracks(tracks);
   });
 
+  // Expose a coverage refresher so callers can update the badge after hydration.
+  el._refreshCoverage = _updateCoverage;
+  _updateCoverage();
+
   return el;
+}
+
+/**
+ * Mount the tempo filter above a track container, following the library.js
+ * insertion pattern. Feasibility-aware: if BPM coverage is too low the controls
+ * render disabled with an explanatory note (owned-only reality). Call AFTER
+ * hydrateBpmByName + addBpmBadges so coverage is accurate.
+ * @param {string} tracksContainerId  selector for the track container.
+ * @param {object} [opts]  forwarded to createBpmFilter (e.g. allowAnalyze).
+ * @returns {HTMLElement|null} the inserted filter element.
+ */
+export function initTempoFilter(tracksContainerId, opts = {}) {
+  const tracksEl = $(tracksContainerId);
+  if (!tracksEl || !tracksEl.parentNode) return null;
+  // Remove any prior filter bar for this container (idempotent re-mount).
+  const prev = tracksEl.parentNode.querySelector(':scope > .bpm-filter');
+  if (prev) prev.remove();
+
+  const filter = createBpmFilter(tracksContainerId, opts);
+
+  // Read the checkbox's default state (CHECKED = include low-conf) so the gate
+  // uses the same policy as the filter and badge — one consistent includeLowConf.
+  const filterCheckbox = filter.querySelector('#bpmLowConf');
+  const includeLowConfDefault = filterCheckbox ? filterCheckbox.checked : true;
+  const cov = coverageSummary(tracksContainerId, includeLowConfDefault);
+  const lowCoverage = cov.total > 0 && (cov.noBpm / cov.total) > LOW_COVERAGE_RATIO;
+  if (lowCoverage) {
+    // Disable interactive controls; keep coverage badge visible.
+    filter.classList.add('bpm-filter-disabled');
+    filter.querySelectorAll('button, input').forEach(c => { c.disabled = true; });
+    const note = document.createElement('span');
+    note.className = 'bpm-filter-note';
+    note.textContent = 'Tempo filter needs analyzed local tracks';
+    filter.appendChild(note);
+  }
+
+  tracksEl.parentNode.insertBefore(filter, tracksEl);
+  return filter;
 }
 
 // Toast with an "Analyze" action button (showToast has no action support).

@@ -11,6 +11,17 @@ import { clearAll as clearPrefetch } from './prefetch.js';
 const UPNEXT_DISPLAY = 'Up Next';
 const RADIO_DISPLAY = 'Radio';
 
+// Re-anchor the DJ engine's per-set state whenever the playback queue is
+// replaced wholesale (the smart-queue candidate pool IS store.playerQueue, so a
+// stale set anchor would corrupt the tempo ramp + prediction==commit invariant).
+// Lazy import keeps the heavy djmix module off the upnext load path.
+async function _resetDjSet() {
+  try {
+    const dj = await import('./djmix.js');
+    dj.resetSmartQueuePlayed && dj.resetSmartQueuePlayed();
+  } catch {}
+}
+
 function _isUpnextRaw(name) {
   return typeof name === 'string' && name.startsWith('__upnext_');
 }
@@ -93,6 +104,9 @@ export async function playTracks(tracks) {
   if (!tracks || !tracks.length) return;
   store.playerQueue = tracks;
   store.playerIndex = 0;
+  // Re-anchor DJ per-set state to the NEW subset so the smart queue's candidate
+  // pool (== store.playerQueue) is freshly bounded and prediction==commit holds.
+  await _resetDjSet();
   const playerMod = await getPlayerModule();
   playerMod.loadAndPlay();
   const id = activePlaylistId();
@@ -116,6 +130,7 @@ export async function playRadio(tracks) {
   } catch {}
   store.playerQueue = tracks;
   store.playerIndex = 0;
+  await _resetDjSet();
   const playerMod = await getPlayerModule();
   playerMod.loadAndPlay();
   const id = activePlaylistId();

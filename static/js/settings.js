@@ -169,25 +169,6 @@ async function _loadMyDevices() {
   } catch {}
 }
 
-async function _saveDeviceSettings() {
-  const name = ($('#settingDeviceName')?.value || '').trim();
-  const mode = $('#settingOutputMode')?.value || 'default';
-  const dlnaUrl = ($('#settingDeviceDlnaUrl')?.value || '').trim();
-  try {
-    await apiJson(`/api/user/devices/${encodeURIComponent(store.deviceId)}`, {
-      method: 'PUT',
-      body: { name, output_mode: mode, dlna_renderer_url: dlnaUrl },
-    });
-    store.deviceName = name;
-    store.deviceOutputMode = mode;
-    store.deviceDlnaRendererUrl = dlnaUrl;
-    const pf = $('#settingPrefetchEnabled')?.value || '1';
-    localStorage.setItem('ms_prefetch_enabled', pf);
-    showToast('Device settings saved');
-    _loadMyDevices();
-  } catch { showToast('Failed to save device settings', true); }
-}
-
 // Engine change requires a reload (memoized module, different audio graph).
 // Persist the active queue first, then reload with cache-bust + app_version.
 async function _applyEngineChange() {
@@ -220,11 +201,20 @@ function _toggleDjSection() {
   // Engine selector lives inside #djModeSection now, so the section is always shown.
   $$('.dj-cf-only').forEach(el => { el.style.display = isCf ? '' : 'none'; });
   $$('.dj-v3-only').forEach(el => { el.style.display = engine === 'dj' ? '' : 'none'; });
-  // Show prefetch toggle (in "This Device") only for Classic player
+  // Show prefetch toggle (in "Playback") only for Classic player
   $$('.classic-only').forEach(el => { el.style.display = engine === 'classic' ? '' : 'none'; });
-  // Load prefetch setting
+  // Load prefetch setting (toggle; localStorage stays '1'/'0' strings for player code)
   const pfEl = $('#settingPrefetchEnabled');
-  if (pfEl) pfEl.value = localStorage.getItem('ms_prefetch_enabled') || '1';
+  if (pfEl) {
+    pfEl.checked = (localStorage.getItem('ms_prefetch_enabled') || '1') === '1';
+    if (!pfEl.dataset.bound) {
+      pfEl.dataset.bound = '1';
+      pfEl.addEventListener('change', () => {
+        localStorage.setItem('ms_prefetch_enabled', pfEl.checked ? '1' : '0');
+        _prefSavedStatus('deviceSaveStatus');
+      });
+    }
+  }
 }
 
 // Each entry: localStorage suffix (after `ms_dj_`) → { sel, def, badge?, fmt? }.
@@ -352,6 +342,127 @@ const _saveDjKey = _debounce((key, val) => {
 
 function _autoSaveDj(key, val) {
   _saveDjKey(key, val);
+}
+
+// ── Generalized preference auto-save ──
+// Mirrors the DJ auto-save pattern: debounced PUT + a per-section `saved ✓`
+// micro-status. Each status element auto-clears after 1.5s.
+const _prefStatusTimers = {};
+function _prefSavedStatus(statusId, text = 'saved ✓', isErr = false) {
+  const el = $('#' + statusId);
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isErr ? 'var(--red)' : 'var(--accent)';
+  clearTimeout(_prefStatusTimers[statusId]);
+  _prefStatusTimers[statusId] = setTimeout(() => { el.textContent = ''; }, 1500);
+}
+
+// Build the global-settings payload from the current form (NO credentials —
+// those go through the Save & Test buttons with conditional-non-empty logic).
+function _buildGlobalSettingsPayload() {
+  const payload = {
+    search_provider: $('#settingSearchProvider').value,
+    search_fallback: $('#settingSearchFallback').value,
+    podcast_provider: $('#settingPodcastProvider').value,
+    default_method: $('#settingMethod').value,
+    default_format: $('#settingFormat').value,
+    max_concurrent: parseInt($('#settingMaxConcurrent').value) || 10,
+    recommendation_source: $('#settingRecommendation').value,
+    slskd_url: $('#settingSlskdUrl').value,
+    navidrome_url: $('#settingNavidromeUrl').value,
+    navidrome_user: $('#settingNavidromeUser').value,
+  };
+  const dlnaUrl = $('#settingDlnaUrl').value.trim();
+  payload.dlna_renderer_url = dlnaUrl;
+  return payload;
+}
+
+// Apply the side effects the old global Save did (search placeholder, store).
+function _applyGlobalSettings(data) {
+  store.appSettings = data;
+  store.searchProvider = data.search_provider || 'deezer';
+  store.podcastProvider = data.podcast_provider || 'itunes';
+  const providerLabels = { deezer: 'Deezer', ytmusic: 'YouTube Music', apple: 'Apple Music', spotify: 'Spotify' };
+  const si = $('#searchInput');
+  if (si) si.placeholder = `Search for music (${providerLabels[store.searchProvider] || store.searchProvider})...`;
+}
+
+// Debounced auto-save for a global-settings field. Admin-only (backend enforces
+// require_admin on PUT /api/settings); non-admins can view but not save, so we
+// skip the PUT entirely for them (mirrors the old admin-gated Save button).
+const _saveGlobalPref = _debounce((statusId) => {
+  if (!(store.currentUser && store.currentUser.is_admin)) return;
+  apiJson('/api/settings', { method: 'PUT', body: _buildGlobalSettingsPayload() })
+    .then(data => { _applyGlobalSettings(data); _prefSavedStatus(statusId); })
+    .catch(() => _prefSavedStatus(statusId, 'save failed', true));
+}, 400);
+
+function _autoSavePref(statusId) {
+  _saveGlobalPref(statusId);
+}
+
+// Debounced auto-save for per-device fields (any user). Reuses the
+// _saveDeviceSettings payload shape (name / output_mode / dlna_renderer_url).
+const _saveDevicePref = _debounce(() => {
+  const name = ($('#settingDeviceName')?.value || '').trim();
+  const mode = $('#settingOutputMode')?.value || 'default';
+  const dlnaUrl = ($('#settingDeviceDlnaUrl')?.value || '').trim();
+  apiJson(`/api/user/devices/${encodeURIComponent(store.deviceId)}`, {
+    method: 'PUT',
+    body: { name, output_mode: mode, dlna_renderer_url: dlnaUrl },
+  }).then(() => {
+    store.deviceName = name;
+    store.deviceOutputMode = mode;
+    store.deviceDlnaRendererUrl = dlnaUrl;
+    _prefSavedStatus('deviceSaveStatus');
+    _loadMyDevices();
+  }).catch(() => _prefSavedStatus('deviceSaveStatus', 'save failed', true));
+}, 400);
+
+// ── Credential Save & Test (conditional-non-empty) ──
+// Builds a global-settings payload that NEVER PUTs an empty secret/key, then
+// re-queries settings to refresh "(set)" placeholders and shows an inline pill.
+async function _saveTestCredentials(btnId, statusId, fields) {
+  const btn = $('#' + btnId);
+  const status = $('#' + statusId);
+  if (!(store.currentUser && store.currentUser.is_admin)) {
+    if (status) { status.style.display = ''; status.textContent = 'Admin only'; status.className = 'conn-status err'; }
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (status) { status.style.display = ''; status.textContent = 'Saving…'; status.className = 'conn-status'; }
+  const payload = _buildGlobalSettingsPayload();
+  // Conditional-non-empty: only include secrets when the user typed something,
+  // so stored credentials are never wiped by an empty value.
+  for (const f of fields) {
+    const v = $(f.sel).value;
+    if (f.secret) { if (v) payload[f.key] = v; }
+    else payload[f.key] = v;
+  }
+  try {
+    const data = await apiJson('/api/settings', { method: 'PUT', body: payload });
+    _applyGlobalSettings(data);
+    if (status) { status.textContent = '✓ Saved'; status.className = 'conn-status ok'; }
+    // Re-query to refresh "(set)" placeholders and clear typed secrets.
+    loadSettings();
+  } catch (e) {
+    if (status) { status.textContent = e.message || 'Failed'; status.className = 'conn-status err'; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Password reveal (eye) toggles ──
+function _bindReveals() {
+  $$('.btn-reveal').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      const inp = $('#' + btn.dataset.reveal);
+      if (!inp) return;
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+  });
 }
 
 // ── Disk Usage ──
@@ -601,40 +712,41 @@ export function init() {
   $('#settingSearchProvider').addEventListener('change', updateFallbackNote);
   $('#settingSearchFallback').addEventListener('change', updateFallbackNote);
 
-  $('#saveSettings').addEventListener('click', async () => {
-    const btn = $('#saveSettings');
-    btn.disabled = true; $('#saveStatus').textContent = '';
-    const payload = {
-      search_provider: $('#settingSearchProvider').value,
-      search_fallback: $('#settingSearchFallback').value,
-      podcast_provider: $('#settingPodcastProvider').value,
-      default_method: $('#settingMethod').value,
-      default_format: $('#settingFormat').value,
-      max_concurrent: parseInt($('#settingMaxConcurrent').value) || 10,
-      recommendation_source: $('#settingRecommendation').value,
-      slskd_url: $('#settingSlskdUrl').value,
-      navidrome_url: $('#settingNavidromeUrl').value,
-      navidrome_user: $('#settingNavidromeUser').value,
-    };
-    const slskdKey = $('#settingSlskdKey').value;
-    if (slskdKey) payload.slskd_api_key = slskdKey;
-    const pass = $('#settingNavidromePass').value;
-    if (pass) payload.navidrome_password = pass;
-    const dlnaUrl = $('#settingDlnaUrl').value.trim();
-    if (dlnaUrl || dlnaUrl === '') payload.dlna_renderer_url = dlnaUrl;
-    try {
-      store.appSettings = await apiJson('/api/settings', { method: 'PUT', body: payload });
-      store.searchProvider = store.appSettings.search_provider || 'deezer';
-      store.podcastProvider = store.appSettings.podcast_provider || 'itunes';
-      const providerLabels = { deezer: 'Deezer', ytmusic: 'YouTube Music', apple: 'Apple Music', spotify: 'Spotify' };
-      $('#searchInput').placeholder = `Search for music (${providerLabels[store.searchProvider] || store.searchProvider})...`;
-      $('#saveStatus').textContent = 'Saved!';
-      setTimeout(() => { $('#saveStatus').textContent = ''; }, 2000);
-    } catch (e) {
-      $('#saveStatus').textContent = 'Failed to save';
-      $('#saveStatus').style.color = 'var(--red)';
-    } finally { btn.disabled = false; }
+  // ── Auto-save: global settings (admin-only; backend enforces require_admin) ──
+  // Downloads section → #downloadsSaveStatus
+  ['#settingSearchProvider', '#settingSearchFallback', '#settingPodcastProvider',
+   '#settingMethod', '#settingFormat', '#settingMaxConcurrent'].forEach(sel => {
+    const el = $(sel);
+    if (!el) return;
+    const ev = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(ev, () => _autoSavePref('downloadsSaveStatus'));
   });
+  // Recommendations section → #recommendationsSaveStatus
+  $('#settingRecommendation')?.addEventListener('change', () => _autoSavePref('recommendationsSaveStatus'));
+  // Casting: global DLNA renderer url → #castingSaveStatus
+  $('#settingDlnaUrl')?.addEventListener('input', () => _autoSavePref('castingSaveStatus'));
+
+  // ── Auto-save: per-device fields (any user) → #deviceSaveStatus ──
+  $('#settingDeviceName')?.addEventListener('input', _saveDevicePref);
+  $('#settingDeviceDlnaUrl')?.addEventListener('input', _saveDevicePref);
+
+  // ── URL/user fields for Library and Download Sources (admin-gated auto-save) ──
+  $('#settingNavidromeUrl')?.addEventListener('input', () => _autoSavePref('navidromeConnStatus'));
+  $('#settingNavidromeUser')?.addEventListener('input', () => _autoSavePref('navidromeConnStatus'));
+  $('#settingSlskdUrl')?.addEventListener('input', () => _autoSavePref('slskdConnStatus'));
+
+  // ── Credential Save (conditional-non-empty) ──
+  $('#saveTestNavidrome')?.addEventListener('click', () => _saveTestCredentials(
+    'saveTestNavidrome', 'navidromeConnStatus',
+    [{ sel: '#settingNavidromePass', key: 'navidrome_password', secret: true }]
+  ));
+  $('#saveTestSlskd')?.addEventListener('click', () => _saveTestCredentials(
+    'saveTestSlskd', 'slskdConnStatus',
+    [{ sel: '#settingSlskdKey', key: 'slskd_api_key', secret: true }]
+  ));
+
+  // Password reveal (eye) toggles
+  _bindReveals();
 
   // Spotify OAuth
   $('#spotifyOAuth').addEventListener('click', async () => {
@@ -703,12 +815,12 @@ export function init() {
     } catch {}
   });
 
-  // Device settings
-  $('#saveDeviceSettings')?.addEventListener('click', _saveDeviceSettings);
+  // Device settings — output mode toggles the DLNA row and auto-saves.
   // DJ settings auto-save (debounced) — bound per-control in _loadDjSettings().
   $('#settingOutputMode')?.addEventListener('change', () => {
     store.deviceOutputMode = $('#settingOutputMode').value;
     _toggleDeviceDlnaRow();
+    _saveDevicePref();
   });
 
   // DLNA scan button — active SSDP scan

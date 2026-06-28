@@ -41,6 +41,8 @@ export function showToast(msg, isError = false) {
   if (!toast) {
     toast = document.createElement('div');
     toast.id = 'toastMsg';
+    toast.setAttribute('aria-live', 'polite');
+    toast.setAttribute('role', 'status');
     toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:20px;font-size:13px;z-index:999;opacity:0;transition:opacity .3s;';
     document.body.appendChild(toast);
   }

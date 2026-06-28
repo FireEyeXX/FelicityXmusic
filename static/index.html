@@ -261,6 +261,7 @@
       </div>
       <div class="playlist-hero-actions">
         <button class="btn-download" id="playAlbum" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
+        <button class="btn-download" id="shuffleAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">&#128256; Shuffle</button>
         <button class="btn-download" id="queueAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Add All</button>
         <button class="btn-download" id="downloadAlbum" style="width:auto; padding:12px 28px;">Download All</button>
       </div>
@@ -404,6 +405,7 @@
       </div>
       <div class="playlist-hero-actions">
         <button class="btn-download" id="playPlaylist" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
+        <button class="btn-download" id="shufflePlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">&#128256; Shuffle</button>
         <button class="btn-download" id="queuePlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Add All</button>
         <button class="btn-download" id="downloadPlaylist" style="width:auto; padding:12px 28px;">Download All</button>
         <label style="font-size: 12px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 6px;">
@@ -467,142 +469,8 @@
 <main id="pageSettings" style="display:none">
   <h2 class="page-title">Settings</h2>
   <div class="settings-form">
-    <details class="setting-section">
-      <summary class="setting-section-title">Downloads</summary>
-      <div class="setting-section-body">
-        <div class="setting-group">
-          <label class="setting-label">Music Search</label>
-          <select class="setting-select" id="settingSearchProvider">
-            <option value="deezer">Deezer</option>
-            <option value="ytmusic">YouTube Music</option>
-            <option value="apple">Apple Music / iTunes</option>
-            <option value="spotify">Spotify (requires API credentials)</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Music Search Fallback</label>
-          <select class="setting-select" id="settingSearchFallback">
-            <option value="">Auto (default)</option>
-            <option value="deezer">Deezer</option>
-            <option value="ytmusic">YouTube Music</option>
-            <option value="apple">Apple Music / iTunes</option>
-            <option value="spotify">Spotify</option>
-            <option value="none">None (no fallback)</option>
-          </select>
-          <div id="searchFallbackNote" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Podcast Search</label>
-          <select class="setting-select" id="settingPodcastProvider">
-            <option value="itunes">iTunes (free, no key needed)</option>
-            <option value="spotify">Spotify (requires API credentials)</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Default Download Method</label>
-          <select class="setting-select" id="settingMethod">
-            <option value="yt-dlp">yt-dlp (YouTube, FLAC/MP3)</option>
-            <option value="slskd">Soulseek (P2P, lossless)</option>
-            <option value="lidarr">Lidarr (Torrent, monitors)</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Default Format</label>
-          <select class="setting-select" id="settingFormat">
-            <option value="flac">FLAC</option>
-            <option value="mp3">MP3 320k</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Max Concurrent Downloads</label>
-          <input class="setting-input" id="settingMaxConcurrent" type="number" min="1" max="20" value="10">
-        </div>
-      </div>
-    </details>
-
-    <details class="setting-section">
-      <summary class="setting-section-title">Radio Recommendations</summary>
-      <div class="setting-section-body">
-        <div class="setting-group">
-          <label class="setting-label">Recommendation Source</label>
-          <select class="setting-select" id="settingRecommendation">
-            <option value="combined">Combined (Deezer + Last.fm)</option>
-            <option value="deezer">Deezer (artist radio — fast)</option>
-            <option value="lastfm">Last.fm (track similarity — precise)</option>
-          </select>
-        </div>
-      </div>
-    </details>
-
-    <details class="setting-section">
-      <summary class="setting-section-title">Soulseek (slskd)</summary>
-      <div class="setting-section-body">
-        <div class="setting-group">
-          <label class="setting-label">slskd URL</label>
-          <input class="setting-input" id="settingSlskdUrl" type="text" placeholder="http://slskd:5030">
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">slskd API Key</label>
-          <input class="setting-input" id="settingSlskdKey" type="password" placeholder="Enter API key...">
-        </div>
-      </div>
-    </details>
-
-    <details class="setting-section">
-      <summary class="setting-section-title">Navidrome</summary>
-      <div class="setting-section-body">
-        <div class="setting-group">
-          <label class="setting-label">Navidrome URL</label>
-          <input class="setting-input" id="settingNavidromeUrl" type="text" placeholder="http://navidrome:4533">
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Navidrome User</label>
-          <input class="setting-input" id="settingNavidromeUser" type="text" placeholder="lucas">
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Navidrome Password</label>
-          <input class="setting-input" id="settingNavidromePass" type="password" placeholder="Enter password...">
-        </div>
-      </div>
-    </details>
-
-    <details class="setting-section">
-      <summary class="setting-section-title">This Device</summary>
-      <div class="setting-section-body">
-        <div class="setting-group">
-          <label class="setting-label">Device Name</label>
-          <input class="setting-input" id="settingDeviceName" type="text" placeholder="e.g. Phone, Work PC, Tablet">
-        </div>
-        <div class="setting-group">
-          <label class="setting-label">Output Mode</label>
-          <select class="setting-select" id="settingOutputMode">
-            <option value="default">Default (local + cast button)</option>
-            <option value="local">Local Only (no casting)</option>
-            <option value="dlna_only">DLNA Only (cast to receiver)</option>
-          </select>
-        </div>
-        <div class="setting-group classic-only" style="display:none;">
-          <label class="setting-label">Prefetch</label>
-          <select class="setting-select" id="settingPrefetchEnabled">
-            <option value="1" selected>On — pre-download next tracks</option>
-            <option value="0">Off — stream only when needed</option>
-          </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">Pre-downloads upcoming tracks for faster playback. Turn off to save data or if playback stutters.</p>
-        </div>
-        <div class="setting-group" id="deviceDlnaRow" style="display:none;">
-          <label class="setting-label">DLNA Renderer URL</label>
-          <input class="setting-input" id="settingDeviceDlnaUrl" type="text" placeholder="http://192.168.1.95:8888/upnp_descriptor_0">
-        </div>
-        <button class="btn-save" id="saveDeviceSettings" style="margin-top:4px;">Save Device Settings</button>
-        <details style="margin-top:12px;">
-          <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;">My Devices</summary>
-          <div id="myDevicesList" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
-        </details>
-      </div>
-    </details>
-
     <details class="setting-section" id="djModeSection">
-      <summary class="setting-section-title">Player &amp; DJ</summary>
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg><span class="setting-section-label">Playback</span></summary>
       <div class="setting-section-body">
 
         <!-- ── Engine (always visible) ── -->
@@ -613,7 +481,16 @@
             <option value="crossfade">Crossfade (Web Audio API)</option>
             <option value="dj">DJ Player (3-band EQ transitions)</option>
           </select>
-          <p style="font-size:11px;color:var(--text-dim);margin-top:4px;">DJ adds EQ/filter transitions; changing reloads the app.</p>
+          <p class="setting-help">DJ adds EQ/filter transitions; changing reloads the app.</p>
+        </div>
+        <!-- ── Prefetch (Classic engine only) — moved from This Device ── -->
+        <div class="setting-group classic-only" style="display:none;">
+          <label class="setting-toggle">
+            <input type="checkbox" id="settingPrefetchEnabled">
+            <span class="switch"></span>
+            <span>Prefetch — pre-download next tracks</span>
+          </label>
+          <p class="setting-help">Pre-downloads upcoming tracks for faster playback. Turn off to save data or if playback stutters.</p>
         </div>
         <div class="setting-group dj-cf-only" style="display:none;">
           <label class="setting-label">Smart Queue</label>
@@ -912,8 +789,152 @@
     </details>
 
     <details class="setting-section">
-      <summary class="setting-section-title">DLNA / UPnP Cast</summary>
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span class="setting-section-label">This Device</span></summary>
       <div class="setting-section-body">
+        <span class="save-status" id="deviceSaveStatus"></span>
+        <div class="setting-group">
+          <label class="setting-label">Device Name</label>
+          <input class="setting-input" id="settingDeviceName" type="text" placeholder="e.g. Phone, Work PC, Tablet">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Output Mode</label>
+          <select class="setting-select" id="settingOutputMode">
+            <option value="default">Default (local + cast button)</option>
+            <option value="local">Local Only (no casting)</option>
+            <option value="dlna_only">DLNA Only (cast to receiver)</option>
+          </select>
+        </div>
+        <div class="setting-group" id="deviceDlnaRow" style="display:none;">
+          <label class="setting-label">DLNA Renderer URL</label>
+          <input class="setting-input" id="settingDeviceDlnaUrl" type="text" placeholder="http://192.168.1.95:8888/upnp_descriptor_0">
+          <p class="setting-help">Per-device override. Applies only to this device when its Output Mode is DLNA Only.</p>
+        </div>
+        <details style="margin-top:12px;">
+          <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;">My Devices</summary>
+          <div id="myDevicesList" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
+        </details>
+      </div>
+    </details>
+
+    <details class="setting-section" id="librarySection">
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg><span class="setting-section-label">Library</span></summary>
+      <div class="setting-section-body">
+        <div class="setting-group">
+          <label class="setting-label">Navidrome URL</label>
+          <input class="setting-input" id="settingNavidromeUrl" type="text" placeholder="http://navidrome:4533">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Navidrome User</label>
+          <input class="setting-input" id="settingNavidromeUser" type="text" placeholder="lucas">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Navidrome Password</label>
+          <div class="input-reveal-wrap">
+            <input class="setting-input" id="settingNavidromePass" type="password" placeholder="Enter password...">
+            <button type="button" class="btn-reveal" data-reveal="settingNavidromePass" title="Show/hide" aria-label="Show password"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;margin-top:4px;">
+          <button class="btn-save" id="saveTestNavidrome">Save</button>
+          <span class="conn-status" id="navidromeConnStatus" style="display:none;"></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="setting-section" id="downloadsSection">
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="setting-section-label">Downloads</span></summary>
+      <div class="setting-section-body">
+        <span class="save-status" id="downloadsSaveStatus"></span>
+        <div class="setting-group">
+          <label class="setting-label">Music Search</label>
+          <select class="setting-select" id="settingSearchProvider">
+            <option value="deezer">Deezer</option>
+            <option value="ytmusic">YouTube Music</option>
+            <option value="apple">Apple Music / iTunes</option>
+            <option value="spotify">Spotify (requires API credentials)</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Music Search Fallback</label>
+          <select class="setting-select" id="settingSearchFallback">
+            <option value="">Auto (default)</option>
+            <option value="deezer">Deezer</option>
+            <option value="ytmusic">YouTube Music</option>
+            <option value="apple">Apple Music / iTunes</option>
+            <option value="spotify">Spotify</option>
+            <option value="none">None (no fallback)</option>
+          </select>
+          <div id="searchFallbackNote" class="setting-help"></div>
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Podcast Search</label>
+          <select class="setting-select" id="settingPodcastProvider">
+            <option value="itunes">iTunes (free, no key needed)</option>
+            <option value="spotify">Spotify (requires API credentials)</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Default Download Method</label>
+          <select class="setting-select" id="settingMethod">
+            <option value="yt-dlp">yt-dlp (YouTube, FLAC/MP3)</option>
+            <option value="slskd">Soulseek (P2P, lossless)</option>
+            <option value="lidarr">Lidarr (Torrent, monitors)</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Default Format</label>
+          <select class="setting-select" id="settingFormat">
+            <option value="flac">FLAC</option>
+            <option value="mp3">MP3 320k</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">Max Concurrent Downloads</label>
+          <input class="setting-input" id="settingMaxConcurrent" type="number" min="1" max="20" value="10">
+        </div>
+      </div>
+    </details>
+
+    <details class="setting-section" id="downloadSourcesSection">
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="setting-section-label">Download Sources</span></summary>
+      <div class="setting-section-body">
+        <div class="setting-group">
+          <label class="setting-label">slskd URL</label>
+          <input class="setting-input" id="settingSlskdUrl" type="text" placeholder="http://slskd:5030">
+        </div>
+        <div class="setting-group">
+          <label class="setting-label">slskd API Key</label>
+          <div class="input-reveal-wrap">
+            <input class="setting-input" id="settingSlskdKey" type="password" placeholder="Enter API key...">
+            <button type="button" class="btn-reveal" data-reveal="settingSlskdKey" title="Show/hide" aria-label="Show API key"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;margin-top:4px;">
+          <button class="btn-save" id="saveTestSlskd">Save</button>
+          <span class="conn-status" id="slskdConnStatus" style="display:none;"></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="setting-section" id="recommendationsSection">
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span class="setting-section-label">Recommendations</span></summary>
+      <div class="setting-section-body">
+        <span class="save-status" id="recommendationsSaveStatus"></span>
+        <div class="setting-group">
+          <label class="setting-label">Recommendation Source</label>
+          <select class="setting-select" id="settingRecommendation">
+            <option value="combined">Combined (Deezer + Last.fm)</option>
+            <option value="deezer">Deezer (artist radio — fast)</option>
+            <option value="lastfm">Last.fm (track similarity — precise)</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <details class="setting-section">
+      <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg><span class="setting-section-label">Casting</span></summary>
+      <div class="setting-section-body">
+        <span class="save-status" id="castingSaveStatus"></span>
         <div class="setting-group">
           <label class="setting-label">DLNA Renderer</label>
           <div style="display:flex;gap:8px;align-items:center;">
@@ -922,23 +943,19 @@
             </select>
             <button class="btn-save" id="dlnaScanBtn" style="padding:8px 14px;font-size:12px;white-space:nowrap;">Scan</button>
           </div>
-          <div id="dlnaScanStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+          <div id="dlnaScanStatus" class="setting-help"></div>
         </div>
         <div class="setting-group">
           <label class="setting-label">Manual Renderer URL (if auto-scan fails)</label>
           <input class="setting-input" id="settingDlnaUrl" type="text" placeholder="http://192.168.1.95:8888/upnp_descriptor_0">
+          <p class="setting-help">Global server-side renderer, shared by all devices. For a single-device override, use the per-device DLNA Renderer URL under This Device.</p>
         </div>
       </div>
     </details>
-
-    <div style="margin-top: 8px;">
-      <button class="btn-save" id="saveSettings">Save Settings</button>
-      <span class="save-status" id="saveStatus"></span>
-    </div>
   </div>
 
   <details class="setting-section" id="spotifySection">
-    <summary class="setting-section-title">Spotify Account</summary>
+    <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14.5c2.5-1 5.5-1 8 .5M7.5 11c3-1.2 6.5-1 9.5 1M7 8c3.5-1.2 8-.8 11 1.5"/></svg><span class="setting-section-label">Account</span></summary>
     <div class="setting-section-body">
       <div id="spotifyStatus" style="font-size:13px;margin-bottom:12px;"></div>
       <div style="margin-bottom:16px;">
@@ -957,11 +974,17 @@
         </div>
         <div class="setting-group">
           <label class="setting-label">Client Secret</label>
-          <input class="setting-input" id="spotifyClientSecret" type="password" placeholder="Enter Client Secret...">
+          <div class="input-reveal-wrap">
+            <input class="setting-input" id="spotifyClientSecret" type="password" placeholder="Enter Client Secret...">
+            <button type="button" class="btn-reveal" data-reveal="spotifyClientSecret" title="Show/hide" aria-label="Show client secret"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
         </div>
         <div class="setting-group">
           <label class="setting-label">Refresh Token</label>
-          <input class="setting-input" id="spotifyRefreshToken" type="password" placeholder="Enter Refresh Token...">
+          <div class="input-reveal-wrap">
+            <input class="setting-input" id="spotifyRefreshToken" type="password" placeholder="Enter Refresh Token...">
+            <button type="button" class="btn-reveal" data-reveal="spotifyRefreshToken" title="Show/hide" aria-label="Show refresh token"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
         </div>
         <div style="display:flex;gap:8px;margin-top:8px;">
           <button class="btn-save" id="spotifyConnect">Connect</button>
@@ -970,43 +993,17 @@
       </div>
       </details>
       <div class="setting-group" style="margin-top:12px;">
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);cursor:pointer;">
-          <input type="checkbox" id="settingHideSpotify" style="accent-color:var(--accent);">
-          Hide "My Spotify" from navigation
+        <label class="setting-toggle">
+          <input type="checkbox" id="settingHideSpotify">
+          <span class="switch"></span>
+          <span>Hide "My Spotify" from navigation</span>
         </label>
       </div>
     </div>
   </details>
 
-  <details class="setting-section" id="usersSection" style="display:none;">
-    <summary class="setting-section-title">User Management</summary>
-    <div class="setting-section-body">
-      <div id="usersList"></div>
-      <div class="add-user-form">
-        <input id="newUsername" type="text" placeholder="Username">
-        <input id="newPassword" type="password" placeholder="Password">
-        <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-muted);"><input type="checkbox" id="newIsAdmin" style="accent-color:var(--accent);"> Admin</label>
-        <details class="perm-section">
-          <summary class="perm-section-title">Formats</summary>
-          <div class="perm-section-body">
-            <label class="perm-check"><span>MP3</span> <input type="checkbox" id="newFmtMp3" checked></label>
-            <label class="perm-check"><span>FLAC</span> <input type="checkbox" id="newFmtFlac" checked></label>
-          </div>
-        </details>
-        <details class="perm-section">
-          <summary class="perm-section-title">Methods</summary>
-          <div class="perm-section-body">
-            <label class="perm-check" title="Stahuje audio z YouTube, metadata ze Spotify"><span>YouTube</span> <input type="checkbox" id="newMethYtdlp" checked></label>
-            <label class="perm-check" title="P2P stahování přes síť Soulseek, preferuje FLAC"><span>Soulseek</span> <input type="checkbox" id="newMethSlskd" checked></label>
-            <label class="perm-check" title="Torrent stahování přes Lidarr, monitoruje diskografie"><span>Torrent</span> <input type="checkbox" id="newMethLidarr" checked></label>
-          </div>
-        </details>
-        <button class="btn-add-user" id="addUserBtn">Add User</button>
-      </div>
-    </div>
-  </details>
   <details class="setting-section" id="desktopAppSection">
-    <summary class="setting-section-title">Native Apps</summary>
+    <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg><span class="setting-section-label">App</span></summary>
     <div class="setting-section-body">
       <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
         Run MusicSeeker as a standalone app with its own window.
@@ -1046,8 +1043,35 @@
     </div>
   </details>
 
+  <details class="setting-section" id="usersSection" style="display:none;">
+    <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg><span class="setting-section-label">User Management</span></summary>
+    <div class="setting-section-body">
+      <div id="usersList"></div>
+      <div class="add-user-form">
+        <input id="newUsername" type="text" placeholder="Username">
+        <input id="newPassword" type="password" placeholder="Password">
+        <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-muted);"><input type="checkbox" id="newIsAdmin" style="accent-color:var(--accent);"> Admin</label>
+        <details class="perm-section">
+          <summary class="perm-section-title">Formats</summary>
+          <div class="perm-section-body">
+            <label class="perm-check"><span>MP3</span> <input type="checkbox" id="newFmtMp3" checked></label>
+            <label class="perm-check"><span>FLAC</span> <input type="checkbox" id="newFmtFlac" checked></label>
+          </div>
+        </details>
+        <details class="perm-section">
+          <summary class="perm-section-title">Methods</summary>
+          <div class="perm-section-body">
+            <label class="perm-check" title="Stahuje audio z YouTube, metadata ze Spotify"><span>YouTube</span> <input type="checkbox" id="newMethYtdlp" checked></label>
+            <label class="perm-check" title="P2P stahování přes síť Soulseek, preferuje FLAC"><span>Soulseek</span> <input type="checkbox" id="newMethSlskd" checked></label>
+            <label class="perm-check" title="Torrent stahování přes Lidarr, monitoruje diskografie"><span>Torrent</span> <input type="checkbox" id="newMethLidarr" checked></label>
+          </div>
+        </details>
+        <button class="btn-add-user" id="addUserBtn">Add User</button>
+      </div>
+    </div>
+  </details>
   <details class="setting-section" id="diskUsageSection" style="display:none;">
-    <summary class="setting-section-title">Disk Usage</summary>
+    <summary class="setting-section-title"><svg class="setting-section-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg><span class="setting-section-label">Disk Usage</span></summary>
     <div class="setting-section-body">
       <div id="diskUsageList"></div>
       <button class="btn-save" id="refreshDiskUsage" style="margin-top:8px;">Refresh</button>
