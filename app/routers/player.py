@@ -32,9 +32,23 @@ async def player_stream_head(name: str, artist: str = "", quality: str = "standa
     mime = "audio/mpeg"
     headers = {"X-Stream-Source": result["source"], "Accept-Ranges": "bytes"}
     if result["source"] == "local":
-        mime = _mime_for_path(result["path"])
-        size = os.path.getsize(result["path"])
-        headers["Content-Length"] = str(size)
+        path = result["path"]
+        is_mp3 = path.rsplit(".", 1)[-1].lower() == "mp3" if "." in path else False
+        # Match GET: non-mp3 local files are served as a cached 320k MP3 unless
+        # lossless was requested, so report that file's MIME + Content-Length.
+        if not is_mp3 and not lossless:
+            # Non-blocking: report cached MP3 size/MIME if already built;
+            # otherwise report raw file (HEAD must never trigger/await a transcode).
+            cached = player.local_transcode_cached_path(path)
+            if cached:
+                mime = "audio/mpeg"
+                headers["Content-Length"] = str(os.path.getsize(cached))
+            else:
+                mime = _mime_for_path(path)
+                headers["Content-Length"] = str(os.path.getsize(path))
+        else:
+            mime = _mime_for_path(path)
+            headers["Content-Length"] = str(os.path.getsize(path))
     elif result["source"] == "navidrome":
         cached = await player.cache_navidrome_stream(result["song_id"], lossless=lossless)
         if cached:
@@ -60,6 +74,22 @@ async def player_stream(name: str, artist: str = "", quality: str = "standard",
     file_headers = {**headers, "Cache-Control": "private, max-age=86400"}
     if source == "local":
         path = result["path"]
+        is_mp3 = path.rsplit(".", 1)[-1].lower() == "mp3" if "." in path else False
+        # Local FLAC is the only fat-blob path (Navidrome/YouTube are already 320k
+        # MP3). Transcode non-mp3 local files to a cached 320k MP3 so prefetch blobs
+        # shrink — unless lossless was requested (audiophile/DLNA path → raw FLAC).
+        if not is_mp3 and not lossless:
+            # Non-blocking check: serve cached MP3 if already built (warm path).
+            cached = player.local_transcode_cached_path(path)
+            if cached:
+                return FileResponse(cached, media_type="audio/mpeg", headers=file_headers)
+            # Cold/live path: serve progressive audio immediately (no full-transcode
+            # stall) then build the cache in background so next play gets cached MP3.
+            t = asyncio.create_task(player.cache_local_transcode(path))
+            _prewarm_tasks.add(t)
+            t.add_done_callback(_prewarm_tasks.discard)
+            return StreamingResponse(player.stream_local_file(path),
+                                     media_type="audio/mpeg", headers=headers)
         mime = _mime_for_path(path)
         # FileResponse supports Range requests (required by Safari for duration/seek)
         return FileResponse(path, media_type=mime, headers=file_headers)
@@ -103,7 +133,14 @@ async def _prewarm_track(track: dict, lossless: bool) -> None:
         elif source == "youtube":
             bitrate = "320k" if lossless else "192k"
             await player.cache_youtube_stream(result["url"], name, artist, bitrate=bitrate)
-        # source == "local": FileResponse is already fast — nothing to warm.
+        elif source == "local":
+            # Non-mp3 local files (FLAC) are transcoded to a cached 320k MP3 on
+            # GET; warm it here (idempotent + locked) so the first track doesn't
+            # pay a cold transcode on its first GET. mp3 files are already fast.
+            path = result["path"]
+            is_mp3 = path.rsplit(".", 1)[-1].lower() == "mp3" if "." in path else False
+            if not is_mp3 and not lossless:
+                await player.cache_local_transcode(path)
     except Exception:
         # Pre-warm is best-effort: never surface errors.
         pass

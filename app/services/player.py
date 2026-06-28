@@ -24,6 +24,7 @@ _URL_CACHE_MAX = 500  # bound memory — keys derive from user-supplied track/ar
 NAV_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # ms-nav-cache (transcoded MP3 / FLAC)
 YT_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024    # ms-yt-cache (YouTube audio)
 BPM_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # ms-bpm-cache (FLAC for BPM analysis)
+LOCAL_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # ms-local-cache (transcoded local FLAC→MP3)
 EVICT_RECENCY_SEC = 5 * 60  # never delete a file modified/accessed in the last 5 min
 
 
@@ -373,6 +374,96 @@ async def cache_navidrome_stream(song_id: str, lossless: bool = False) -> str | 
                     if os.path.exists(p):
                         os.unlink(p)
                 return None
+    finally:
+        _release_build_lock(lock_key)
+
+
+def local_transcode_cached_path(path: str) -> str | None:
+    """Return the ms-local-cache path for *path* IFF it already exists and is
+    non-empty. Never builds, never awaits — safe to call from HEAD or the GET
+    fast path to decide whether to serve the cached MP3 or fall through to
+    progressive streaming."""
+    import tempfile, hashlib
+    try:
+        abspath = os.path.abspath(path)
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    key = hashlib.sha1(f"{abspath}{mtime}".encode()).hexdigest()
+    cache_path = os.path.join(tempfile.gettempdir(), "ms-local-cache", f"{key}.mp3")
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return cache_path
+    return None
+
+
+async def cache_local_transcode(path: str) -> str | None:
+    """Transcode a local non-MP3 file (e.g. FLAC) to a cached 320k MP3 and return
+    its path. Mirrors cache_navidrome_stream: keyed by sha1(abspath + mtime) so a
+    re-downloaded/re-tagged file re-transcodes, uses the per-target in-flight build
+    lock + double-checked existence (so prefetch×3 + prewarm + the real GET collapse
+    to a single ffmpeg run), writes atomically (.tmp then os.rename), and evicts the
+    cache dir after the rename. Returns None on failure (caller falls back to raw)."""
+    import tempfile, hashlib
+    cache_dir = os.path.join(tempfile.gettempdir(), "ms-local-cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        os.chmod(cache_dir, 0o700)  # keep cached audio private to the app user
+    except OSError:
+        pass
+    try:
+        abspath = os.path.abspath(path)
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    key = hashlib.sha1(f"{abspath}{mtime}".encode()).hexdigest()
+    cache_path = os.path.join(cache_dir, f"{key}.mp3")
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return cache_path
+    # Serialize per-target so concurrent prefetch/prewarm/stream GET don't all
+    # transcode. Re-check existence inside the lock (double-checked locking):
+    # later callers reuse the first build's result.
+    lock_key = f"local:{cache_path}"
+    lock = _get_build_lock(lock_key)
+    try:
+        async with lock:
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                return cache_path
+            proc = None
+            try:
+                # Transcode the WHOLE file (not a stream fragment) so the output
+                # MP3 has a valid header → correct duration on the client deck.
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-i", path,
+                    "-f", "mp3", "-ab", "320k", "-vn",
+                    "-y", cache_path + ".tmp",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=20)
+                if proc.returncode == 0 and os.path.exists(cache_path + ".tmp"):
+                    os.rename(cache_path + ".tmp", cache_path)
+                    evict_cache_dir(cache_dir, LOCAL_CACHE_MAX_BYTES)
+                    return cache_path
+            except Exception:
+                pass
+            finally:
+                # Kill the child if it is still running (timeout or other error).
+                if proc is not None and proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        await proc.wait()
+                    except Exception:
+                        pass
+            for p in (cache_path + ".tmp", cache_path):
+                if os.path.exists(p):
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
+            return None
     finally:
         _release_build_lock(lock_key)
 

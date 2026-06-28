@@ -12,7 +12,7 @@ import httpx
 import numpy as np
 
 from app.services import library
-from app.services.player import find_track_file, evict_cache_dir, BPM_CACHE_MAX_BYTES
+from app.services.player import find_track_file, evict_cache_dir, BPM_CACHE_MAX_BYTES, cache_navidrome_stream
 
 logger = logging.getLogger(__name__)
 
@@ -1128,6 +1128,14 @@ async def _get_audio_file(song_id: str, name: str, artist: str) -> str | None:
 
     if not library.NAVIDROME_PASSWORD or not song_id:
         return None
+
+    # Reuse the player's shared Navidrome stream cache (ms-nav-cache/{song_id}.mp3)
+    # instead of pulling a second original-FLAC copy. Lossy 320k MP3 is transparent
+    # for tempo/beat-grid/key/LUFS; it's build-lock-guarded against the live stream GET.
+    shared = await cache_navidrome_stream(song_id, lossless=False)
+    if shared:
+        return shared
+    # Fall back to original-FLAC download if the shared MP3 build failed.
 
     cache_dir = os.path.join(tempfile.gettempdir(), "ms-bpm-cache")
     os.makedirs(cache_dir, exist_ok=True)
