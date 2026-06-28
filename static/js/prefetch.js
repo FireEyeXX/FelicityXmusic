@@ -10,6 +10,10 @@ const MAX_CONCURRENT = 3;
 const _queue = [];              // priority-sorted FIFO
 function _prefetchCount() { return parseInt(localStorage.getItem('ms_dj_prefetch_count')) || 3; }
 
+/** Stream quality gate. Default 'standard' → server transcodes local FLAC → 320k MP3
+ *  (smaller blob, faster prefetch). 'lossless' → server serves raw FLAC (audiophile). */
+export function streamQuality() { return localStorage.getItem('ms_dj_quality') || 'standard'; }
+
 let _paused = false;
 export function pausePrefetch() { _paused = true; }
 /** Abort all in-progress prefetch downloads to free bandwidth for the playing track. */
@@ -162,7 +166,7 @@ async function _startFetch(entry) {
     const cleanName = _decodeEntities(entry.item.name || '');
     const cleanArtist = _decodeEntities(entry.item.artist || '');
     const params = new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) });
-    const res = await apiFetch(`/api/player/stream?${params}`, { signal: controller.signal });
+    const res = await apiFetch(`/api/player/stream?${params}&quality=${streamQuality()}`, { signal: controller.signal });
     if (!res.ok) { _fetching.delete(entry.key); _processNext(); return; }
     // Validate content-type — reject HTML/JSON error pages served with 200 status.
     // Accept audio/* and application/octet-stream (some flac/mp3 streams use it).

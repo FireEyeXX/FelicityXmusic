@@ -7,7 +7,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortStale, keyFor as prefetchKey, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortStale, keyFor as prefetchKey, resumePrefetch, streamQuality } from './prefetch.js';
 import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, findCrossfadeStartDownbeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
 import { getDjData } from './bpm.js';
 import * as cast from './cast.js';
@@ -710,7 +710,7 @@ async function _loadAndPlayImpl() {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}&quality=${streamQuality()}`;
 
     const currentDeck = _activeDeckEl();
     // Fix 4: a track that ended WITHOUT firing the auto trigger leaves currentDeck paused
@@ -1191,7 +1191,7 @@ export async function playRecTrack(item) {
   } else {
     _ensureAudioContext();
     if (_ctx.state === 'suspended') _ctx.resume();
-    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}`;
+    const streamUrl = `/api/player/stream?${new URLSearchParams({ name: cleanName, artist: cleanArtist, token: (store.streamToken || store.authToken) })}&quality=${streamQuality()}`;
     const cached = getCachedUrl(cleanName, cleanArtist, item.id);
     const src = cached || streamUrl;
     const curDeck = _activeDeckEl();
@@ -1364,7 +1364,7 @@ export async function loadQueueState() {
         $('#playerArtist').textContent = item.artist || '';
         const deck = _activeDeckEl();
         const params = new URLSearchParams({ name: item.name || '', artist: item.artist || '', token: (store.streamToken || store.authToken) });
-        const restoreSrc = `/api/player/stream?${params}`;
+        const restoreSrc = `/api/player/stream?${params}&quality=${streamQuality()}`;
         if (deck === _deckA) _expectedSrcA = restoreSrc;
         else _expectedSrcB = restoreSrc;
         deck.src = restoreSrc;
@@ -1622,8 +1622,11 @@ export function init() {
         let effectiveEnd = dur;
         const outroSkip = _djSetting('outro_skip', 'auto');
         if (outroSkip === 'auto' && _outDjData && _outDjData.outro_start
-            && _outDjData.outro_start > dur * 0.75
-            && _outDjData.outro_start < dur) { // must be within the last 25% of THIS track
+            && _outDjData.outro_start > dur * 0.85
+            && _outDjData.outro_start < dur) { // must be deep in the last ~15% of THIS track
+          // Conservative guard: the backend outro heuristic can false-positive on a
+          // beat-detection dropout in the last minute. The 0.85 gate ensures outro_start
+          // is already deep enough that auto outro-skip can shave at most ~15% off the end.
           effectiveEnd = _outDjData.outro_start;
         } else if (outroSkip !== '0' && outroSkip !== 'auto') {
           effectiveEnd = dur - (parseInt(outroSkip) || 0);
@@ -1666,7 +1669,7 @@ export function init() {
             if (localStorage.getItem('ms_dj_debug') === '1') {
               const _cur = store.playerQueue[store.playerIndex];
               const _gridUsed = !IS_WEBKIT && !!(_outDjData && _outDjData.beat_grid && _outDjData.bpm);
-              const _msg = `[DJ auto] ratio=${(deck.currentTime / dur).toFixed(3)} ct=${deck.currentTime.toFixed(1)} dur=${dur.toFixed(1)} effEnd=${effectiveEnd.toFixed(1)} triggerAt=${triggerAt.toFixed(1)} rem=${remaining.toFixed(1)} grid=${_gridUsed ? 'beat' : 'fallback'} play=${_cur ? _smartKey(_cur) : '?'} outBpm=${_outDjData?.bpm ?? 'null'}`;
+              const _msg = `[DJ auto] ratio=${(deck.currentTime / dur).toFixed(3)} ct=${deck.currentTime.toFixed(1)} dur=${dur.toFixed(1)} effEnd=${effectiveEnd.toFixed(1)} triggerAt=${triggerAt.toFixed(1)} rem=${remaining.toFixed(1)} grid=${_gridUsed ? 'beat' : 'fallback'} play=${_cur ? _smartKey(_cur) : '?'} outBpm=${_outDjData?.bpm ?? 'null'} outroStart=${_outDjData?.outro_start ?? 'null'}`;
               console.log(_msg);
               window._djLastTrigger = _msg;
             }
