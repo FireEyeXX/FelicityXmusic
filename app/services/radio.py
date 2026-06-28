@@ -532,6 +532,67 @@ def _tempo_coherence_score(track: dict, seed_bpm: float, seed_camelot: str | Non
     return score
 
 
+def _feature_centroid(tracks: list[dict]) -> tuple[float | None, float | None] | None:
+    """Derive a seed/profile energy+danceability centroid from the bpm cache.
+
+    Reads the SAME local audio features (energy, danceability) the analyzer
+    stores (bpm.py FEATURE_VERSION). Mirrors _seed_tempo_context: known-only,
+    averages over tracks that HAVE the values, ignores missing. Each axis is
+    tracked independently: returns None for an axis with no data rather than a
+    hardcoded 0.5 substitute. Returns None overall only if BOTH axes have no
+    data (nothing to compare against)."""
+    import numpy as _np
+    energies: list[float] = []
+    dances: list[float] = []
+    for t in tracks:
+        c = bpm_service.get_cached_bpm(t.get("name", ""), t.get("artist", ""))
+        if not c:
+            continue
+        e = c.get("energy")
+        d = c.get("danceability")
+        if isinstance(e, (int, float)):
+            energies.append(float(e))
+        if isinstance(d, (int, float)):
+            dances.append(float(d))
+    if not energies and not dances:
+        return None
+    mean_e: float | None = float(_np.mean(energies)) if energies else None
+    mean_d: float | None = float(_np.mean(dances)) if dances else None
+    return mean_e, mean_d
+
+
+def _feature_coherence_score(
+    track: dict, centroid: tuple[float | None, float | None] | None
+) -> float:
+    """Confidence-aware energy/danceability term, shaped like
+    _tempo_coherence_score. Candidate features are only known for
+    locally-analyzed tracks → returns 0 when unknown (never penalize for
+    missing features, exactly like the tempo pattern).
+
+    Compares ONLY axes present in BOTH the seed centroid AND the candidate —
+    a None centroid axis or a missing candidate axis is silently skipped.
+    Returns 0.0 when no axis is comparable."""
+    if centroid is None:
+        return 0.0
+    c = bpm_service.get_cached_bpm(track.get("name", ""), track.get("artist", ""))
+    if not c:
+        return 0.0  # unknown features → degrade gracefully, no penalty
+    seed_e, seed_d = centroid
+    # Distance over axes present in BOTH centroid and candidate.
+    diffs: list[float] = []
+    e = c.get("energy")
+    if seed_e is not None and isinstance(e, (int, float)):
+        diffs.append(abs(float(e) - seed_e))
+    d = c.get("danceability")
+    if seed_d is not None and isinstance(d, (int, float)):
+        diffs.append(abs(float(d) - seed_d))
+    if not diffs:
+        return 0.0  # no comparable axis → treat as unknown
+    dist = sum(diffs) / len(diffs)  # mean abs distance in 0..1
+    # Closer = higher; bounded reward in [0, 2.0] mirroring the in-band tempo reward.
+    return 2.0 * (1.0 - min(1.0, dist))
+
+
 # Vibe tag sets for the "calm" mode of seed-track radio.
 CALM_TAGS = {
     "rnb", "r&b", "soul", "neo soul", "chillout", "downtempo", "acoustic",
@@ -558,6 +619,28 @@ def _calm_bpm_ok(track: dict) -> bool:
         if _CALM_BPM_LO <= b <= _CALM_BPM_HI:
             return True
     return False
+
+
+# Absolute energy/danceability ceilings for the "calm" mood axis (0..1 features).
+_CALM_ENERGY_MAX = 0.55
+_CALM_DANCE_MAX = 0.55
+
+
+def _calm_features_ok(track: dict) -> bool:
+    """Calm-vibe energy gate (true mood axis, not just BPM band). Drops a
+    candidate only when its energy/danceability are *known* (locally analyzed)
+    AND clearly high. Unknown features are kept → falls back to the BPM/tag
+    proxy, exactly like _calm_bpm_ok degrades gracefully."""
+    c = bpm_service.get_cached_bpm(track.get("name", ""), track.get("artist", ""))
+    if not c:
+        return True
+    e = c.get("energy")
+    d = c.get("danceability")
+    if isinstance(e, (int, float)) and float(e) > _CALM_ENERGY_MAX:
+        return False
+    if isinstance(d, (int, float)) and float(d) > _CALM_DANCE_MAX:
+        return False
+    return True
 
 
 async def get_track_radio(
@@ -697,6 +780,11 @@ async def get_track_radio(
                 if c.get("camelot"):
                     seed_camelot = c["camelot"]
 
+    # ── Seed energy/danceability centroid (local features; None when unknown) ──
+    feature_centroid: tuple[float, float] | None = None
+    if tempo_coherent:
+        feature_centroid = _feature_centroid([{"name": seed_name, "artist": seed_artist}])
+
     seed_tags_lc = {s.lower().strip() for s in seed_tags if s}
 
     # ── Pre-fetch distinct candidate-artist tags ONCE ──────────────
@@ -731,8 +819,8 @@ async def get_track_radio(
         artist_n = _norm_artist(track.get("artist") or "")
         cand_tags = artist_tags.get(artist_n, set())
 
-        # ── Calm-vibe BPM gate ──
-        if vibe == "calm" and not _calm_bpm_ok(track):
+        # ── Calm-vibe gate: BPM proxy AND (when known) real low-energy ──
+        if vibe == "calm" and (not _calm_bpm_ok(track) or not _calm_features_ok(track)):
             return None
 
         score = 0.0
@@ -744,6 +832,8 @@ async def get_track_radio(
             score += 1.5
         if seed_bpm is not None:
             score += _tempo_coherence_score(track, seed_bpm, seed_camelot)
+        # ── Energy/danceability coherence to the seed (local features) ──
+        score += 1.5 * _feature_coherence_score(track, feature_centroid)
 
         # Seed-artist penalty: keep the seed's own catalog from flooding the radio.
         if artist_n == seed_artist_norm:
@@ -751,10 +841,24 @@ async def get_track_radio(
                 score -= 4.0
             seed_artist_count += 1
 
-        # ── Calm-vibe tag steering ──
+        # ── Vibe tag steering (calm prefers calm tags; energy is symmetric) ──
         if vibe == "calm" and cand_tags:
             score += 2.0 * len(cand_tags & CALM_TAGS)
             score -= 2.0 * len(cand_tags & ENERGY_TAGS)
+        elif vibe == "energy" and cand_tags:
+            score += 2.0 * len(cand_tags & ENERGY_TAGS)
+            score -= 2.0 * len(cand_tags & CALM_TAGS)
+
+        # ── Energy-vibe steering on real features (high energy/danceability) ──
+        if vibe == "energy":
+            ec = bpm_service.get_cached_bpm(track.get("name", ""), track.get("artist", ""))
+            if ec:
+                e = ec.get("energy")
+                d = ec.get("danceability")
+                if isinstance(e, (int, float)):
+                    score += 2.0 * float(e)
+                if isinstance(d, (int, float)):
+                    score += 1.0 * float(d)
 
         return (score, track)
 

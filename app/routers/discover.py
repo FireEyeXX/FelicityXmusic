@@ -99,7 +99,7 @@ async def get_track_radio_endpoint(
     camelot: str = "",
     bpm: float | None = None,
     limit: int = Query(25, ge=1, le=50),
-    vibe: str = Query("", pattern="^(calm|)$"),
+    vibe: str = Query("", pattern="^(calm|energy|)$"),
     user: dict = Depends(auth.get_current_user),
 ):
     source = app_settings._settings.get("recommendation_source", "combined")
