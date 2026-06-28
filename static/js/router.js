@@ -138,7 +138,16 @@ function handleKeydown(e) {
   }
   if (e.key === 'Escape') {
     if (store.queuePanelOpen) { closeQueuePanel(); return; }
-    if (store.fullPlayerOpen) { closeFullPlayer(); return; }
+    if (store.fullPlayerOpen) {
+      // Synchronous flag check — decided before any microtask can flip it.
+      // Drawer open → close ONLY the drawer; second Esc closes the player.
+      if (window.__djPanelOpen) {
+        import('./djpanel.js').then(m => m.closeDjPanelFromRouter());
+        return;
+      }
+      closeFullPlayer();
+      return;
+    }
     closeModal();
     closePanel();
   }

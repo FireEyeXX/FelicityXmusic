@@ -5,6 +5,7 @@ import { $, fmtTime, showToast, historyBack } from './utils.js';
 import { apiJson } from './api.js';
 import { renderQueueInto, renderQueue, openFpQueuePanel, closeFpQueuePanel, closeQueuePanel, scrollToNowPlaying } from './queue.js';
 import { toggleLike, isLiked } from './likes.js';
+import * as djPanel from './djpanel.js';
 
 // Forward references set during init to avoid circular imports
 let nextTrack, prevTrack, loadAndPlay, hidePlayerBar, saveQueueDebounced, updatePlayPauseIcon;
@@ -169,6 +170,9 @@ export function openFullPlayer() {
   // Show/hide cast volume slider
   const castVol = $('#fpCastVol');
   if (castVol) castVol.style.display = store.castDevice ? '' : 'none';
+  // FIX 3: re-sync DJ panel in case Settings changed a ms_dj_* key while
+  // the user had navigated away from the player within the same tab.
+  djPanel.syncDjPanel();
   // Load recommendations if not loaded yet
   import('./recommendations.js').then(m => m.onPanelOpened());
 }
@@ -371,6 +375,9 @@ export function init() {
       import('./utils.js').then(m => m.showToast(labels[next]));
     });
   }
+
+  // DJ quick-control drawer (curated live knobs; DJ engine only)
+  djPanel.init();
 
   // Repeat toggle: off -> all -> one -> off
   $('#fpRepeat').addEventListener('click', toggleRepeat);
