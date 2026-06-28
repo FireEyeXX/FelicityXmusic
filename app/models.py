@@ -118,6 +118,10 @@ class DeleteAlbumRequest(BaseModel):
     album: str
 
 
+class PrewarmRequest(BaseModel):
+    tracks: list[dict] = []  # [{name, artist, id}], bounded to <=3 server-side
+
+
 class RecommendationRequest(BaseModel):
     tracks: list[dict]
     limit: int = Field(15, ge=1, le=50)

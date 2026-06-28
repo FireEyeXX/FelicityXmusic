@@ -12,7 +12,7 @@ import httpx
 import numpy as np
 
 from app.services import library
-from app.services.player import find_track_file
+from app.services.player import find_track_file, evict_cache_dir, BPM_CACHE_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -1146,6 +1146,7 @@ async def _get_audio_file(song_id: str, name: str, artist: str) -> str | None:
                     async for chunk in resp.aiter_bytes(8192):
                         f.write(chunk)
         os.rename(cache_path + ".tmp", cache_path)
+        evict_cache_dir(cache_dir, BPM_CACHE_MAX_BYTES)
         return cache_path
     except Exception as e:
         logger.error("Failed to stream from Navidrome for BPM analysis: %s", e)

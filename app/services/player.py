@@ -19,6 +19,95 @@ _url_cache: dict[str, tuple[dict, float]] = {}
 _URL_TTL = 4 * 3600  # 4 hours
 _URL_CACHE_MAX = 500  # bound memory — keys derive from user-supplied track/artist names
 
+# On-disk temp cache size caps (bytes). Files are evicted oldest-first by mtime
+# once a cache dir exceeds its cap, except files touched within EVICT_RECENCY_SEC.
+NAV_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # ms-nav-cache (transcoded MP3 / FLAC)
+YT_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024    # ms-yt-cache (YouTube audio)
+BPM_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # ms-bpm-cache (FLAC for BPM analysis)
+EVICT_RECENCY_SEC = 5 * 60  # never delete a file modified/accessed in the last 5 min
+
+
+def evict_cache_dir(path: str, max_bytes: int) -> None:
+    """Best-effort LRU-ish sweep of an on-disk temp cache directory.
+
+    When the directory's total size exceeds ``max_bytes``, delete files
+    oldest-first (by mtime) until back under the cap. Any file modified or
+    accessed within ``EVICT_RECENCY_SEC`` is skipped so we never remove a file
+    that may be mid-stream or freshly written. This function must never raise:
+    it runs after a cache write on the stream hot path, so all errors are
+    swallowed and it simply gives up on anything it can't handle.
+    """
+    try:
+        now = time.time()
+        entries = []
+        total = 0
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                total += st.st_size
+                # Use the most recent of mtime/atime as the "last touched" time.
+                last_touch = max(st.st_mtime, st.st_atime)
+                entries.append((last_touch, st.st_size, entry.path))
+        if total <= max_bytes:
+            return
+        # Oldest first.
+        entries.sort(key=lambda e: e[0])
+        for last_touch, size, fpath in entries:
+            if total <= max_bytes:
+                break
+            if now - last_touch < EVICT_RECENCY_SEC:
+                continue  # too recently touched — may be mid-stream/just-written
+            try:
+                os.unlink(fpath)
+                total -= size
+            except OSError:
+                # File vanished or is locked; ignore and keep sweeping.
+                continue
+    except Exception:
+        # Sweep is opportunistic and must never break a stream response.
+        pass
+
+
+# Per-cache-target in-flight build locks. Pre-warm and the real stream GET can
+# hit the same uncached song concurrently; without this both would transcode
+# (double CPU). The lock serializes builds per key so the second caller reuses
+# the first's result (double-checked existence inside the lock).
+#
+# Refcount design: _get_build_lock increments a per-key counter (synchronously,
+# no await between ++ and store, so a plain int is safe in asyncio). The lock is
+# only removed from the dict when the refcount reaches 0, preventing the race
+# where locked() returns False between holder exit and waiter resume — which
+# would cause a new caller to create a fresh lock and double-transcode.
+_build_locks: dict[str, asyncio.Lock] = {}
+_build_lock_refs: dict[str, int] = {}
+
+
+def _get_build_lock(key: str) -> asyncio.Lock:
+    lock = _build_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _build_locks[key] = lock
+    _build_lock_refs[key] = _build_lock_refs.get(key, 0) + 1
+    return lock
+
+
+def _release_build_lock(key: str) -> None:
+    """Decrement refcount; pop lock from the dict only when it reaches 0.
+    This keeps the dict bounded while never orphaning a lock a waiter still
+    holds — unlike a locked()-check which races between holder exit and waiter
+    resume."""
+    count = _build_lock_refs.get(key, 1) - 1
+    if count <= 0:
+        _build_locks.pop(key, None)
+        _build_lock_refs.pop(key, None)
+    else:
+        _build_lock_refs[key] = count
+
 
 def _cache_key(name: str, artist: str) -> str:
     return f"{artist.lower().strip()}:{name.lower().strip()}"
@@ -258,22 +347,34 @@ async def cache_navidrome_stream(song_id: str, lossless: bool = False) -> str | 
         params = library._params(id=song_id, format="mp3", maxBitRate=320)
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return cache_path
-    url = f"{library.NAVIDROME_URL}/rest/stream"
+    # Serialize per-target so a concurrent pre-warm + stream GET don't both
+    # transcode. Re-check existence inside the lock (double-checked locking):
+    # the second caller reuses the first build's result.
+    lock_key = f"nav:{cache_path}"
+    lock = _get_build_lock(lock_key)
     try:
-        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            async with client.stream("GET", url, params=params) as resp:
-                resp.raise_for_status()
-                with open(cache_path + ".tmp", "wb") as f:
-                    async for chunk in resp.aiter_bytes(8192):
-                        f.write(chunk)
-        os.rename(cache_path + ".tmp", cache_path)
-        return cache_path
-    except Exception:
-        # Cleanup partial file
-        for p in (cache_path + ".tmp", cache_path):
-            if os.path.exists(p):
-                os.unlink(p)
-        return None
+        async with lock:
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                return cache_path
+            url = f"{library.NAVIDROME_URL}/rest/stream"
+            try:
+                async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+                    async with client.stream("GET", url, params=params) as resp:
+                        resp.raise_for_status()
+                        with open(cache_path + ".tmp", "wb") as f:
+                            async for chunk in resp.aiter_bytes(8192):
+                                f.write(chunk)
+                os.rename(cache_path + ".tmp", cache_path)
+                evict_cache_dir(cache_dir, NAV_CACHE_MAX_BYTES)
+                return cache_path
+            except Exception:
+                # Cleanup partial file
+                for p in (cache_path + ".tmp", cache_path):
+                    if os.path.exists(p):
+                        os.unlink(p)
+                return None
+    finally:
+        _release_build_lock(lock_key)
 
 
 async def stream_navidrome(song_id: str, lossless: bool = False):
@@ -326,28 +427,40 @@ async def cache_youtube_stream(youtube_url: str, name: str, artist: str, bitrate
     cache_path = os.path.join(cache_dir, f"{key}{suffix}.mp3")
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return cache_path
+    # Serialize per-target so a concurrent pre-warm + stream GET don't both
+    # download/transcode. Re-check existence inside the lock (double-checked
+    # locking): the second caller reuses the first build's result.
+    lock_key = f"yt:{cache_path}"
+    lock = _get_build_lock(lock_key)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-reconnect", "1", "-reconnect_streamed", "1",
-            "-i", youtube_url,
-            "-f", "mp3", "-ab", bitrate, "-vn",
-            "-y", cache_path + ".tmp",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=120)
-        if proc.returncode == 0 and os.path.exists(cache_path + ".tmp"):
-            os.rename(cache_path + ".tmp", cache_path)
-            return cache_path
-    except Exception:
-        pass
-    for p in (cache_path + ".tmp", cache_path):
-        if os.path.exists(p):
+        async with lock:
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                return cache_path
             try:
-                os.unlink(p)
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-reconnect", "1", "-reconnect_streamed", "1",
+                    "-i", youtube_url,
+                    "-f", "mp3", "-ab", bitrate, "-vn",
+                    "-y", cache_path + ".tmp",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=120)
+                if proc.returncode == 0 and os.path.exists(cache_path + ".tmp"):
+                    os.rename(cache_path + ".tmp", cache_path)
+                    evict_cache_dir(cache_dir, YT_CACHE_MAX_BYTES)
+                    return cache_path
             except Exception:
                 pass
-    return None
+            for p in (cache_path + ".tmp", cache_path):
+                if os.path.exists(p):
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
+            return None
+    finally:
+        _release_build_lock(lock_key)
 
 
 def invalidate_cache(name: str, artist: str):

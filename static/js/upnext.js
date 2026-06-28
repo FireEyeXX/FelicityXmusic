@@ -100,10 +100,25 @@ export function isTempActive() {
 
 // Replace local playback queue AND mirror to the active temp playlist on
 // Navidrome (Up Next OR Radio). Named playlists are never auto-replaced.
+// Fire-and-forget: ask the server to pre-warm its stream cache for the upcoming
+// first track so its first GET /api/player/stream skips cold-start transcode
+// latency. Best-effort — never blocks playback, never surfaces errors.
+function _prewarmFirst() {
+  try {
+    const first = store.playerQueue && store.playerQueue[store.playerIndex];
+    if (!first) return;
+    apiJson('/api/player/prewarm', {
+      method: 'POST',
+      body: { tracks: [{ name: first.name, artist: first.artist, id: first.id }] },
+    }).catch(() => {});
+  } catch {}
+}
+
 export async function playTracks(tracks) {
   if (!tracks || !tracks.length) return;
   store.playerQueue = tracks;
   store.playerIndex = 0;
+  _prewarmFirst();
   // Re-anchor DJ per-set state to the NEW subset so the smart queue's candidate
   // pool (== store.playerQueue) is freshly bounded and prediction==commit holds.
   await _resetDjSet();
@@ -130,6 +145,7 @@ export async function playRadio(tracks) {
   } catch {}
   store.playerQueue = tracks;
   store.playerIndex = 0;
+  _prewarmFirst();
   await _resetDjSet();
   const playerMod = await getPlayerModule();
   playerMod.loadAndPlay();

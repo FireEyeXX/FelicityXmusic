@@ -1,13 +1,18 @@
+import asyncio
 import os
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 
-from app.models import QueueState, AddToQueueRequest, RecommendationRequest
+from app.models import QueueState, AddToQueueRequest, RecommendationRequest, PrewarmRequest
 from app.services import auth, player, radio, settings as app_settings
 from app.dependencies import _stream_auth, _get_device_id
 
 router = APIRouter(prefix="/api/player", tags=["player"])
+
+# Retains references to fire-and-forget pre-warm tasks so they are not GC'd
+# mid-flight (asyncio only weakly references unawaited tasks).
+_prewarm_tasks: set[asyncio.Task] = set()
 
 
 def _mime_for_path(path: str) -> str:
@@ -49,17 +54,21 @@ async def player_stream(name: str, artist: str = "", quality: str = "standard",
         raise HTTPException(404, "Could not resolve stream for this track")
     source = result["source"]
     headers = {"X-Stream-Source": source}
+    # Owned/cached files are immutable per song → let the browser HTTP cache
+    # serve repeat plays (1 day). Only applied to seekable FileResponse paths,
+    # never to the live chunked StreamingResponse fallback.
+    file_headers = {**headers, "Cache-Control": "private, max-age=86400"}
     if source == "local":
         path = result["path"]
         mime = _mime_for_path(path)
         # FileResponse supports Range requests (required by Safari for duration/seek)
-        return FileResponse(path, media_type=mime, headers=headers)
+        return FileResponse(path, media_type=mime, headers=file_headers)
     elif source == "navidrome":
         # Try cached file first (supports Range requests, seeking, correct duration)
         cached = await player.cache_navidrome_stream(result["song_id"], lossless=lossless)
         if cached:
             mime = _mime_for_path(cached) if lossless else "audio/mpeg"
-            return FileResponse(cached, media_type=mime, headers=headers)
+            return FileResponse(cached, media_type=mime, headers=file_headers)
         mime = "audio/flac" if lossless else "audio/mpeg"
         return StreamingResponse(player.stream_navidrome(result["song_id"], lossless=lossless),
                                   media_type=mime, headers=headers)
@@ -68,9 +77,52 @@ async def player_stream(name: str, artist: str = "", quality: str = "standard",
         # Try cached file first for proper duration/seeking
         cached = await player.cache_youtube_stream(result["url"], name, artist, bitrate=bitrate)
         if cached:
-            return FileResponse(cached, media_type="audio/mpeg", headers=headers)
+            return FileResponse(cached, media_type="audio/mpeg", headers=file_headers)
         return StreamingResponse(player.stream_youtube(result["url"], bitrate=bitrate),
                                   media_type="audio/mpeg", headers=headers)
+
+
+async def _prewarm_track(track: dict, lossless: bool) -> None:
+    """Best-effort: build the server stream cache for one upcoming track using
+    the SAME resolution path as GET /stream. Never raises (swallows all errors)
+    and never blocks playback — runs as fire-and-forget background work. The
+    underlying cache builders are idempotent + per-song locked, so this safely
+    races the real stream GET without double-transcoding."""
+    try:
+        name = (track or {}).get("name") or ""
+        artist = (track or {}).get("artist") or ""
+        if not name:
+            return
+        result = await player.resolve_stream(name, artist)
+        if not result:
+            return
+        source = result["source"]
+        if source == "navidrome":
+            # Idempotent + locked: builds the transcoded/cached file if missing.
+            await player.cache_navidrome_stream(result["song_id"], lossless=lossless)
+        elif source == "youtube":
+            bitrate = "320k" if lossless else "192k"
+            await player.cache_youtube_stream(result["url"], name, artist, bitrate=bitrate)
+        # source == "local": FileResponse is already fast — nothing to warm.
+    except Exception:
+        # Pre-warm is best-effort: never surface errors.
+        pass
+
+
+@router.post("/prewarm")
+async def player_prewarm(req: PrewarmRequest, quality: str = "standard",
+                          user: dict = Depends(auth.get_current_user)):
+    """Pre-warm the server stream cache for the upcoming first track(s) so its
+    first GET /stream pays no cold-start transcode latency. Fire-and-forget:
+    returns 202 immediately and never blocks on the build. Local-file tracks are
+    skipped (already fast); per-track errors are swallowed (never 500)."""
+    lossless = quality == "lossless"
+    tracks = (req.tracks or [])[:3]  # bounded to <=3
+    for track in tracks:
+        t = asyncio.create_task(_prewarm_track(track, lossless))
+        _prewarm_tasks.add(t)
+        t.add_done_callback(_prewarm_tasks.discard)
+    return JSONResponse(status_code=202, content={"status": "warming", "count": len(tracks)})
 
 
 @router.get("/stream-token")
