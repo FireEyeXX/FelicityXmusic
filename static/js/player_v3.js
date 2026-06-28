@@ -7,7 +7,7 @@ import { apiJson } from './api.js';
 import { openModal } from './downloads.js';
 import { renderQueue } from './queue.js';
 import { syncFullPlayer } from './fullplayer.js';
-import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortPrefetch, resumePrefetch } from './prefetch.js';
+import { getCachedUrl, waitForCache, getStatus as getPrefetchStatus, prefetchTrack, cleanup as prefetchCleanup, pausePrefetch, abortStale, keyFor as prefetchKey, resumePrefetch } from './prefetch.js';
 import { fetchDjData, scheduleDjTransitionV3, resetDeckAfterTransitionV3, scheduleDjTransition, resetDeckAfterTransition, findCrossfadeStartBeat, findCrossfadeStartDownbeat, pickSmartNext, markPlayed, resetSmartQueuePlayed, CrossfadeBeatSync, IS_WEBKIT, webkitCrossfadeDuration } from './djmix.js';
 import { getDjData } from './bpm.js';
 import * as cast from './cast.js';
@@ -400,6 +400,26 @@ async function _preAnalyzeUpcoming() {
     prefetchTrack(name, artist, seqNext.id);
   }
 
+  // Step 2.5: PRIORITIZE the predicted-next track — it becomes _outDjData at the next swap.
+  // Analyze it FIRST and ALONE (before the broad warming pool, which competes at low
+  // concurrency) so its beat grid is ready for a beat-matched crossfade. Reuses the
+  // already-bound _predictedNextIdx (no pickSmartNext call) → determinism intact.
+  if (smartMode !== 'off' && !store.shuffleEnabled
+      && _predictedNextIdx != null
+      && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length
+      && _predictedNextIdx !== store.playerIndex) {
+    const pItem = store.playerQueue[_predictedNextIdx];
+    const pName = _decodeEntities(pItem.name || '');
+    const pArtist = _decodeEntities(pItem.artist || '');
+    if (!getDjData(pName, pArtist)) {
+      await fetchDjData(pName, pArtist).catch(() => null);
+      if (gen !== _analyzeGen) return; // superseded by a newer run
+    }
+    if (!_inDjData) _inDjData = getDjData(pName, pArtist);
+    resumePrefetch();
+    prefetchTrack(pName, pArtist, pItem.id);
+  }
+
   // Step 3: Analyze remaining forward (and, for Smart Queue, backward) tracks for the
   // candidate pool. Collect the target indices, then fetch in concurrency-4 chunks
   // (mirrors the batch pattern in bpm.js addScanButton) instead of one-at-a-time.
@@ -409,9 +429,14 @@ async function _preAnalyzeUpcoming() {
     if (idx >= store.playerQueue.length) break;
     toAnalyze.push(idx);
   }
-  // Backward: previous tracks (when Smart Queue searches whole playlist)
+  // Backward: previous tracks (when Smart Queue searches whole playlist). Symptom A (#6):
+  // these analysis downloads compete with prefetch, so cut the BACKWARD span to a small
+  // window instead of the full PRE_ANALYZE depth. Forward analysis stays at full depth so
+  // pickSmartNext still has its forward candidate pool (determinism preserved); the smaller
+  // backward window keeps the whole-playlist fallback viable without starving prefetch.
   if (smartMode !== 'off') {
-    for (let i = store.playerIndex - 1; i >= Math.max(0, store.playerIndex - PRE_ANALYZE); i--) {
+    const BACKWARD = Math.min(3, PRE_ANALYZE);
+    for (let i = store.playerIndex - 1; i >= Math.max(0, store.playerIndex - BACKWARD); i--) {
       toAnalyze.push(i);
     }
   }
@@ -422,7 +447,17 @@ async function _preAnalyzeUpcoming() {
     if (getDjData(name, artist)) return;
     await fetchDjData(name, artist).catch(() => null);
   };
-  const CONCURRENT = 4;
+  // Symptom A (#6): lower analyze concurrency (4 → 2) so the BPM-warming downloads don't
+  // serialize/starve the next-track prefetch that's already in flight. Prefetch is NOT
+  // blocked by this loop — it runs independently on its own queue/MAX_CONCURRENT.
+  // Adaptive: keep concurrency low (2) while the immediate-next prefetch is in flight so
+  // warming doesn't starve it; raise to 4 once that blob is cached (no bandwidth contention)
+  // to restore warming depth deeper into a session.
+  const _immNext = store.playerQueue[store.playerIndex + 1];
+  const _immReady = _immNext
+    ? (getPrefetchStatus(_decodeEntities(_immNext.name || ''), _decodeEntities(_immNext.artist || ''), _immNext.id)?.state === 'ready')
+    : true;
+  const CONCURRENT = _immReady ? 4 : 2;
   for (let i = 0; i < toAnalyze.length; i += CONCURRENT) {
     const batch = toAnalyze.slice(i, i + CONCURRENT);
     await Promise.all(batch.map(analyzeOne));
@@ -432,19 +467,38 @@ async function _preAnalyzeUpcoming() {
   // Step 4: Predict Smart Queue pick, store the prediction (so commit reuses it),
   // update _inDjData + prefetch.
   if (smartMode !== 'off' && !store.shuffleEnabled && _outDjData) {
-    const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
-    if (gen !== _analyzeGen) return; // superseded — don't bind a stale prediction
-    if (smartIdx != null) {
-      const item = store.playerQueue[smartIdx];
+    // Guard: if the `playing` handler already ran pickSmartNext early (FIX 2 — sync DJ
+    // data cache hit) and bound _predictedNextIdx for THIS position, do NOT re-run
+    // pickSmartNext here. Step 3 just analyzed more forward tracks, so candidate scores
+    // may have shifted → a re-pick could choose a DIFFERENT index than the one we already
+    // prefetched → prediction≠prefetch≠commit → non-gapless hard cut. The early binding
+    // is authoritative; skip the re-pick and only ensure _inDjData + prefetch are current.
+    const _alreadyBound = _predictedNextIdx != null
+      && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length
+      && _predictedNextIdx !== store.playerIndex;
+    if (_alreadyBound) {
+      // Prediction already set — just wire _inDjData and confirm the prefetch (idempotent).
+      const item = store.playerQueue[_predictedNextIdx];
       const name = _decodeEntities(item.name || '');
       const artist = _decodeEntities(item.artist || '');
-      // C1: record what we predicted+prefetched so _nextTrackInQueue reuses this exact
-      // index at commit instead of recomputing (and possibly diverging → non-gapless).
-      _predictedNextIdx = smartIdx;
-      _predictedNextKey = _smartKey(item);
       _inDjData = getDjData(name, artist);
       resumePrefetch();           // C5: ensure prefetch isn't paused in smart mode
       prefetchTrack(name, artist, item.id);
+    } else {
+      const smartIdx = pickSmartNext(store.playerQueue, store.playerIndex, _outDjData, smartMode, store.repeatMode === 'all');
+      if (gen !== _analyzeGen) return; // superseded — don't bind a stale prediction
+      if (smartIdx != null) {
+        const item = store.playerQueue[smartIdx];
+        const name = _decodeEntities(item.name || '');
+        const artist = _decodeEntities(item.artist || '');
+        // C1: record what we predicted+prefetched so _nextTrackInQueue reuses this exact
+        // index at commit instead of recomputing (and possibly diverging → non-gapless).
+        _predictedNextIdx = smartIdx;
+        _predictedNextKey = _smartKey(item);
+        _inDjData = getDjData(name, artist);
+        resumePrefetch();         // C5: ensure prefetch isn't paused in smart mode
+        prefetchTrack(name, artist, item.id);
+      }
     }
   }
 }
@@ -524,10 +578,28 @@ window._androidBridgeReady = function() {
 
 // ── Helper: get duration with Safari fallback ──
 function _getDuration() {
-  let dur = _activeDeckEl().duration;
-  if (dur && isFinite(dur) && dur > 0) return dur;
   const item = store.playerQueue[store.playerIndex] || _currentRecItem;
-  if (item && item.duration_ms > 0) return item.duration_ms / 1000;
+  const metaSec = item && item.duration_ms > 0 ? item.duration_ms / 1000 : 0;
+  const deck = _activeDeckEl();
+  const dur = deck.duration;
+  const deckOk = dur && isFinite(dur) && dur > 0;
+  // WebKit/WKWebView (notably AVFoundation on macOS) can report a streamed track's
+  // audio.duration as a small value that TRACKS the playhead (duration ≈ currentTime),
+  // or otherwise materially wrong, instead of the true file length. That bogus-but-
+  // positive value passes a naive isFinite/>0 guard, so progress (currentTime/dur) and
+  // the auto-crossfade trigger (which share this value) peg at the wrong point — the
+  // track gets cut at its real midpoint. ONLY on WebKit, and only when authoritative
+  // Spotify metadata exists, distrust a deck duration that tracks the playhead
+  // (dur ≈ currentTime) or disagrees materially (>15%) and use duration_ms instead.
+  // Other platforms keep trusting the deck: its value is correct there and IS the true
+  // length even when it differs from Spotify metadata (e.g. yt-dlp/Soulseek edits).
+  if (IS_WEBKIT && metaSec > 0 && deckOk) {
+    const tracksPlayhead = dur <= (deck.currentTime || 0) + 1;
+    const disagrees = Math.abs(dur - metaSec) > metaSec * 0.15;
+    return (tracksPlayhead || disagrees) ? metaSec : dur;
+  }
+  if (deckOk) return dur;
+  if (metaSec > 0) return metaSec;
   return null;
 }
 
@@ -581,8 +653,19 @@ async function _loadAndPlayImpl() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) {
     return;
   }
-  // Abort prefetch downloads — current track gets all bandwidth
-  abortPrefetch();
+  // Symptom A (#4) — on advance, abort/evict only NOW-STALE prefetch entries (tracks no
+  // longer near the new playerIndex) instead of aborting ALL downloads. Keep the track(s)
+  // about to be needed (the new current track's blob if still downloading, plus the next
+  // track and the bound prediction) flowing so the crossfade still gets a full blob and
+  // the Next dot reaches green — without waiting for the late crossfade-complete resume.
+  const _keep = new Set();
+  const _kAdd = (it) => { if (it) _keep.add(prefetchKey(_decodeEntities(it.name || ''), _decodeEntities(it.artist || ''), it.id)); };
+  _kAdd(store.playerQueue[store.playerIndex]);       // new current track (may still be downloading)
+  _kAdd(store.playerQueue[store.playerIndex + 1]);   // sequential next — needed for next crossfade
+  if (_predictedNextIdx != null && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length) {
+    _kAdd(store.playerQueue[_predictedNextIdx]);      // Smart Queue predicted next
+  }
+  abortStale(_keep);
   _crossfadeTriggered = false;
   const endedBlend = _endedBlend; // Fix 4: consume the one-shot blend-on-ended request
   _endedBlend = false;
@@ -694,6 +777,30 @@ async function _loadAndPlayImpl() {
         await _waitForCanPlay(nextDeck, 2500);
         _startCrossfade(false); // non-seekable live stream — also swaps _activeDeck
       }
+      // Symptom A (#4) — the swap is done; resume prefetch PROMPTLY instead of waiting for
+      // the crossfade-complete timer (~line 333). pausePrefetch() above freed bandwidth for
+      // the incoming track's brief load; now re-issue the next track's prefetch so it's a
+      // full blob before the NEXT crossfade. In Smart Queue, prefer the bound prediction
+      // (same track the next crossfade will consume → no divergence); else sequential next.
+      // ONLY on the cached-blob path: the incoming deck is fully loaded locally and needs
+      // no network — safe to spin up concurrent downloads immediately. On the UNCACHED path
+      // the incoming deck is still buffering from the stream; starting up to MAX_CONCURRENT=3
+      // downloads concurrently would starve it → audible stutter during the fade. Leave
+      // prefetch paused and rely on the existing crossfade-complete resume (~line 333).
+      if (cached) {
+        resumePrefetch();
+        const _afterIdx = store.playerIndex;
+        let _afterNext = null;
+        if (_djSetting('smart_queue', 'off') !== 'off' && _predictedNextIdx != null
+            && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length) {
+          _afterNext = store.playerQueue[_predictedNextIdx];
+        } else {
+          _afterNext = store.playerQueue[_afterIdx + 1];
+        }
+        if (_afterNext) {
+          prefetchTrack(_decodeEntities(_afterNext.name || ''), _decodeEntities(_afterNext.artist || ''), _afterNext.id);
+        }
+      }
     } else {
       // Cold start — play immediately, no cache wait
       if (_crossfading && _fadingOutDeck) {
@@ -728,8 +835,13 @@ async function _loadAndPlayImpl() {
       // so this is usually a hit; the async fetchDjData below is the cache-miss fallback.
       _outDjData = getDjData(cleanName, cleanArtist) || null;
       if (!_outDjData) {
+        // Same identity-guard as the `playing` refill: a cache-miss fetch for this track
+        // can resolve AFTER an auto-advance and would otherwise bind a neighbour's data
+        // (→ midpoint-cut). Only bind if still empty AND the active track is unchanged.
+        const _want = _smartKey(item);
         fetchDjData(cleanName, cleanArtist).then(d => {
-          if (!_outDjData) _outDjData = d;
+          const cur = store.playerQueue[store.playerIndex];
+          if (d && !_outDjData && cur && _smartKey(cur) === _want) _outDjData = d;
           // Late level-match once data arrives (set plain value, never a ramp).
           if (_activeLevel()) _activeLevel().gain.value = _levelGainFor(_outDjData?.lufs);
         }).catch(() => {});
@@ -1313,19 +1425,67 @@ export function init() {
       if (!_outDjData) {
         const item = store.playerQueue[store.playerIndex];
         if (item) {
+          // Identity-guard the async write: a fetch started for track N can resolve AFTER
+          // an auto-advance to N+1 and would otherwise overwrite _outDjData with a NEIGHBOUR
+          // track's grid/outro_start → the auto-crossfade trigger then fires off the wrong
+          // track's data (floor at 0.5·dur → tracks cut at their midpoint, accumulating over
+          // a session). Only bind if nothing is bound AND the active track is still the one
+          // we fetched for. Mirrors the _analyzeGen/identity discipline used elsewhere.
+          const want = _smartKey(item);
           fetchDjData(_decodeEntities(item.name || ''), _decodeEntities(item.artist || ''))
-            .then(d => { if (d) _outDjData = d; }).catch(() => {});
+            .then(d => {
+              const cur = store.playerQueue[store.playerIndex];
+              if (d && !_outDjData && cur && _smartKey(cur) === want) _outDjData = d;
+            }).catch(() => {});
         }
       }
-      // Wait for current track to buffer enough before starting prefetch/pre-analyze
+      // Symptom A — kick off the next-track prefetch IMMEDIATELY, NOT gated behind
+      // _waitForBuffer or the BPM pre-analysis. The crossfade needs a fully-downloaded
+      // blob; starting now makes the Next dot green in time.
+      resumePrefetch(); // clear _paused so prefetchTrack isn't a no-op
+      const sm = _djSetting('smart_queue', 'off');
+      let immediate = null;
+      if (sm !== 'off' && _predictedNextIdx != null
+          && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length) {
+        // Prediction already bound (e.g. a previous playing event or pre-analysis already
+        // ran) — reuse it: same track dot/crossfade/prefetch all target → no divergence.
+        immediate = store.playerQueue[_predictedNextIdx];
+      } else if (sm !== 'off' && !store.shuffleEnabled) {
+        // FIX 2: _predictedNextIdx is null because it was consumed at the prior advance
+        // (nulled before loadAndPlay). In smart mode the DJ data for the current track is
+        // usually already cached from the prior _preAnalyzeUpcoming run; if so, compute the
+        // prediction NOW (sync, fast) and bind _predictedNextIdx immediately — the same
+        // one dot/crossfade/_preAnalyzeUpcoming all reuse → prediction==prefetch==commit.
+        // If _outDjData isn't cached yet, fall through to sequential for the early kickoff;
+        // _preAnalyzeUpcoming (in _waitForBuffer callback) will bind + prefetch the real
+        // prediction once data is available. That path is unchanged/no regression.
+        const curItem = store.playerQueue[store.playerIndex];
+        const cachedDj = curItem
+          ? getDjData(_decodeEntities(curItem.name || ''), _decodeEntities(curItem.artist || ''))
+          : null;
+        if (cachedDj) {
+          // Sync path: DJ data is in the bpm cache — pick immediately, no await.
+          const earlyIdx = pickSmartNext(store.playerQueue, store.playerIndex, cachedDj, sm, store.repeatMode === 'all');
+          if (earlyIdx != null) {
+            const earlyItem = store.playerQueue[earlyIdx];
+            _predictedNextIdx = earlyIdx;
+            _predictedNextKey = _smartKey(earlyItem);
+            // _inDjData will be resolved (sync or async) by _preAnalyzeUpcoming as usual.
+            immediate = earlyItem;
+          }
+        }
+        if (!immediate) immediate = store.playerQueue[store.playerIndex + 1]; // DJ data miss → sequential fallback
+      } else {
+        immediate = store.playerQueue[store.playerIndex + 1];
+      }
+      if (immediate) {
+        prefetchTrack(_decodeEntities(immediate.name || ''), _decodeEntities(immediate.artist || ''), immediate.id);
+      }
+      // BPM pre-analysis (bulk warming + smart prediction refinement if not yet bound) run
+      // in the BACKGROUND after buffering so they don't steal bandwidth from the current
+      // track's initial network fill. The prefetch above is already in flight.
       _waitForBuffer(deck).then(() => {
         if (deck !== _activeDeckEl() || deck.paused) return;
-        const sm = _djSetting('smart_queue', 'off');
-        if (sm === 'off') {
-          // Sequential mode: prefetch next N tracks in order
-          resumePrefetch();
-        }
-        // Pre-analyze handles Smart Queue prefetch via prefetchTrack()
         _preAnalyzeUpcoming();
       });
     });
@@ -1414,11 +1574,25 @@ export function init() {
       if (!window._pfLastUpdate || Date.now() - window._pfLastUpdate > 500) {
         window._pfLastUpdate = Date.now();
         const curItem = store.playerQueue[store.playerIndex];
-        const nextItem = store.playerQueue[store.playerIndex + 1];
-        // Now: is current track from cache (blob) or streaming?
+        // Next: in Smart Queue the PREFETCHED track is the predicted index, NOT the
+        // sequential successor. Query the track we actually prefetched so the dot reflects
+        // reality (else the lookup misses → dot never green). Fall back to playerIndex+1.
+        let nextItem;
+        if (_djSetting('smart_queue', 'off') !== 'off'
+            && _predictedNextIdx != null
+            && _predictedNextIdx >= 0 && _predictedNextIdx < store.playerQueue.length) {
+          nextItem = store.playerQueue[_predictedNextIdx];
+        } else {
+          nextItem = store.playerQueue[store.playerIndex + 1];
+        }
+        // Now: green when the current track is actually playing/ready — i.e. the active
+        // deck has HAVE_FUTURE_DATA and isn't errored — OR it's a cached blob OR prefetch
+        // still reports 'ready'. A live-streamed (or already-consumed-blob) current track
+        // would otherwise never show green even while audibly playing.
         const nowCached = deck.src && deck.src.startsWith('blob:');
         const nowSt = curItem ? getPrefetchStatus(_decodeEntities(curItem.name || ''), _decodeEntities(curItem.artist || ''), curItem.id) : null;
-        const nowReady = nowCached || (nowSt && nowSt.state === 'ready');
+        const nowPlaying = deck.readyState >= 3 && !deck.error;
+        const nowReady = nowPlaying || nowCached || (nowSt && nowSt.state === 'ready');
         // Next: prefetch progress
         const nextSt = nextItem ? getPrefetchStatus(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || ''), nextItem.id) : null;
         const nextPct = nextSt ? nextSt.progress : -1;
@@ -1448,7 +1622,8 @@ export function init() {
         let effectiveEnd = dur;
         const outroSkip = _djSetting('outro_skip', 'auto');
         if (outroSkip === 'auto' && _outDjData && _outDjData.outro_start
-            && _outDjData.outro_start > dur * 0.75) { // ignore outro before last 25%
+            && _outDjData.outro_start > dur * 0.75
+            && _outDjData.outro_start < dur) { // must be within the last 25% of THIS track
           effectiveEnd = _outDjData.outro_start;
         } else if (outroSkip !== '0' && outroSkip !== 'auto') {
           effectiveEnd = dur - (parseInt(outroSkip) || 0);
@@ -1488,6 +1663,13 @@ export function init() {
           const hasNext = store.playerIndex < store.playerQueue.length - 1 || store.repeatMode === 'all'
             || _djSetting('smart_queue', 'off') !== 'off'; // smart mode can pick an unplayed earlier track
           if (hasNext) {
+            if (localStorage.getItem('ms_dj_debug') === '1') {
+              const _cur = store.playerQueue[store.playerIndex];
+              const _gridUsed = !IS_WEBKIT && !!(_outDjData && _outDjData.beat_grid && _outDjData.bpm);
+              const _msg = `[DJ auto] ratio=${(deck.currentTime / dur).toFixed(3)} ct=${deck.currentTime.toFixed(1)} dur=${dur.toFixed(1)} effEnd=${effectiveEnd.toFixed(1)} triggerAt=${triggerAt.toFixed(1)} rem=${remaining.toFixed(1)} grid=${_gridUsed ? 'beat' : 'fallback'} play=${_cur ? _smartKey(_cur) : '?'} outBpm=${_outDjData?.bpm ?? 'null'}`;
+              console.log(_msg);
+              window._djLastTrigger = _msg;
+            }
             _crossfadeTriggered = true;
             nextTrack({ reason: 'auto' });
           }

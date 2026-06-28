@@ -6,7 +6,7 @@ import { apiFetch } from './api.js';
 
 const _cache = new Map();       // "artist:name" → { blobUrl }
 const _fetching = new Map();    // key → { priority, controller, progress }
-const MAX_CONCURRENT = 2;
+const MAX_CONCURRENT = 3;
 const _queue = [];              // priority-sorted FIFO
 function _prefetchCount() { return parseInt(localStorage.getItem('ms_dj_prefetch_count')) || 3; }
 
@@ -20,6 +20,26 @@ export function abortPrefetch() {
     _fetching.delete(key);
   }
 }
+/** Abort/evict only NOW-STALE in-flight + queued fetches whose key is not in keepKeys,
+ *  keeping the still-needed downloads (e.g. the immediate/predicted next track) running.
+ *  Unlike abortPrefetch this does NOT set _paused — prefetch keeps flowing so the kept
+ *  download finishes and new ones can be issued right after an advance. Returns nothing. */
+export function abortStale(keepKeys) {
+  const keep = keepKeys instanceof Set ? keepKeys : new Set(keepKeys || []);
+  for (const [key, state] of _fetching) {
+    if (keep.has(key)) continue;
+    try { state.controller.abort(); } catch (e) {}
+    _fetching.delete(key);
+  }
+  for (let i = _queue.length - 1; i >= 0; i--) {
+    if (!keep.has(_queue[i].key)) _queue.splice(i, 1);
+  }
+}
+
+/** Build the prefetch cache key for a track (decoded artist:name or id:<id>).
+ *  Exposed so callers can compute keepKeys for abortStale that match _key exactly. */
+export function keyFor(name, artist, id) { return _key(name, artist, id); }
+
 /** Abort in-flight fetches, drop the pending queue, and revoke EVERY cached blob.
  *  Call when the active queue is cleared/replaced so blob URLs don't leak.
  *  Precondition: callers must pause active playback first — this revokes the
