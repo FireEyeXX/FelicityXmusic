@@ -1597,6 +1597,14 @@ export function init() {
         const nextSt = nextItem ? getPrefetchStatus(_decodeEntities(nextItem.name || ''), _decodeEntities(nextItem.artist || ''), nextItem.id) : null;
         const nextPct = nextSt ? nextSt.progress : -1;
         let html = '';
+        // Source badge for the CURRENT track: is the active deck playing from device
+        // memory (a cached blob: URL, link-safe) or the live /api/player/stream URL
+        // (at-risk on a flaky venue link)? Lets the DJ SEE the source at a glance.
+        const deckEl = _activeDeckEl();
+        const fromDevice = !!(deckEl && deckEl.src && deckEl.src.startsWith('blob:'));
+        html += fromDevice
+          ? `<span class="src-badge device" title="Playing from device memory">📥 Device</span>`
+          : `<span class="src-badge live" title="Playing from live stream">☁ MP3</span>`;
         // Now dot
         html += `<span class="prefetch-dot ${nowReady ? 'ready' : 'loading'}" title="Now"></span>`;
         // Next dot + progress

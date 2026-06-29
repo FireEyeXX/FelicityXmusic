@@ -8,9 +8,11 @@
 // Only visible when the active engine is 'dj' (ms_player_engine === 'dj').
 
 import { $ } from './utils.js';
+import { store } from './store.js';
 import { getPlayerModule } from './player_active.js';
 import { switchPage } from './router.js';
 import { closeFullPlayer } from './fullplayer.js';
+import { preloadSet, clearPreload, preloadStatus, cleanup as prefetchCleanup } from './prefetch.js';
 
 // Curated controls. `key` is the EXACT localStorage suffix after `ms_dj_`
 // (i.e. the literal _djSetting() argument the engine reads).
@@ -46,6 +48,60 @@ function _writeKey(key, val) {
   }, 300));
 }
 
+// ── Preload set ─────────────────────────────────────────────────────────────
+// Download the whole forward queue into device memory (pinned) so the deck plays
+// from memory and a flaky venue link can't interrupt the set. Polls preloadStatus()
+// while active to show progress + a ~MB footprint estimate.
+let _preloadActive = false;
+let _preloadTimer = null;
+
+function _fmtMB(bytes) { return (bytes / 1e6).toFixed(1); }
+
+function _renderPreloadStatus() {
+  const el = $('#fpDjPreloadStatus');
+  const btn = $('#fpDjPreloadBtn');
+  if (!el) return;
+  const { total, done, bytes } = preloadStatus();
+  if (!_preloadActive || total === 0) { el.textContent = ''; return; }
+  const mb = _fmtMB(bytes);
+  if (done >= total) {
+    el.textContent = `Set ready ✓ · ~${mb} MB`;
+    if (btn) btn.textContent = 'Clear ✕';
+    // Done — stop polling but keep the pins (blobs stay in memory for the set).
+    _stopPreloadPoll();
+  } else {
+    el.textContent = `Preloaded ${done}/${total} · ~${mb} MB`;
+    if (btn) btn.textContent = 'Clear ✕';
+  }
+}
+
+function _stopPreloadPoll() {
+  if (_preloadTimer) { clearInterval(_preloadTimer); _preloadTimer = null; }
+}
+
+function _startPreload() {
+  _preloadActive = true;
+  preloadSet(store.playerQueue, store.playerIndex);
+  _stopPreloadPoll();
+  _preloadTimer = setInterval(_renderPreloadStatus, 500);
+  _renderPreloadStatus();
+}
+
+function _stopPreload() {
+  _preloadActive = false;
+  _stopPreloadPoll();
+  clearPreload();
+  prefetchCleanup(store.playerQueue, store.playerIndex);
+  const el = $('#fpDjPreloadStatus');
+  if (el) el.textContent = '';
+  const btn = $('#fpDjPreloadBtn');
+  if (btn) btn.textContent = 'Preload set';
+}
+
+function _togglePreload() {
+  _preloadActive ? _stopPreload() : _startPreload();
+}
+
 // Pull current values from localStorage into the panel controls. Called on every
 // open so the panel reflects any change made in Settings since last time.
 export function syncDjPanel() {
@@ -79,6 +135,12 @@ function openDjPanel() {
   if (btn) { btn.classList.add('active'); btn.setAttribute('aria-expanded', 'true'); }
   _isOpen = true;
   window.__djPanelOpen = true;
+  // Resume preload status polling if a preload is still active from a prior open.
+  if (_preloadActive) {
+    _stopPreloadPoll();
+    _preloadTimer = setInterval(_renderPreloadStatus, 500);
+    _renderPreloadStatus();
+  }
   // OPT: move focus to close button for keyboard accessibility
   setTimeout(() => $('#fpDjPanelClose')?.focus(), 50);
 }
@@ -91,6 +153,10 @@ function closeDjPanel() {
   if (btn) { btn.classList.remove('active'); btn.setAttribute('aria-expanded', 'false'); }
   _isOpen = false;
   window.__djPanelOpen = false;
+  // Stop polling preloadStatus while the drawer is hidden — the preload itself
+  // keeps running in prefetch.js (pins survive); we just pause the UI updates and
+  // resume rendering on the next open.
+  _stopPreloadPoll();
   // OPT: restore focus to trigger button
   $('#fpDjPanelBtn')?.focus();
 }
@@ -150,6 +216,7 @@ export function init() {
   $('#fpDjPanelClose')?.addEventListener('click', closeDjPanel);
   $('#fpDjBackdrop')?.addEventListener('click', closeDjPanel);
   $('#fpDjMoreSettings')?.addEventListener('click', openSettingsDjSection);
+  $('#fpDjPreloadBtn')?.addEventListener('click', (e) => { e.stopPropagation(); _togglePreload(); });
 
   // Esc is owned exclusively by router.js (synchronous flag check via window.__djPanelOpen).
   // No local keydown listener here — avoids the race where djpanel's handler fires

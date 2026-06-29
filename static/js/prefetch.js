@@ -4,10 +4,15 @@
 import { store } from './store.js';
 import { apiFetch } from './api.js';
 
-const _cache = new Map();       // "artist:name" → { blobUrl }
+const _cache = new Map();       // "artist:name" → { blobUrl, size }
 const _fetching = new Map();    // key → { priority, controller, progress }
 const MAX_CONCURRENT = 3;
 const _queue = [];              // priority-sorted FIFO
+// Preload-set state: keys pinned against eviction + the (key,item) targets to
+// keep re-enqueued across resume. Empty when no preload is active → cleanup and
+// resume behave EXACTLY as before (no pins → nothing extra kept/re-enqueued).
+const _pinned = new Set();      // keys that must never be evicted
+const _preloadItems = [];       // [{ key, item }] of the preload target
 function _prefetchCount() { return parseInt(localStorage.getItem('ms_dj_prefetch_count')) || 3; }
 
 /** Stream quality gate. Default 'standard' → server transcodes local FLAC → 320k MP3
@@ -52,6 +57,10 @@ export function clearAll() {
   for (const [, state] of _fetching) { try { state.controller.abort(); } catch (e) {} }
   _fetching.clear();
   _queue.length = 0;
+  // Queue is being replaced → any preload target is void; clear pins so the new
+  // blobs evict normally (no leftover pins keeping stale-queue blobs alive).
+  _pinned.clear();
+  _preloadItems.length = 0;
   for (const [, entry] of _cache) URL.revokeObjectURL(entry.blobUrl);
   _cache.clear();
 }
@@ -135,8 +144,61 @@ export function prefetchUpcoming(queue, currentIndex, count) {
   _processNext();
 }
 
+/** Preload the ENTIRE forward queue into device memory, pinned against eviction.
+ *  For a flaky venue link: the deck then plays cached blobs and a link outage
+ *  during the set doesn't matter. Uses the existing priority queue so the live
+ *  deck's immediate/predicted-next prefetch (priority 0/low) still wins — preload
+ *  entries get priority `i - fromIndex` so NEAR tracks download first and the
+ *  far tail never starves the playing track. Pins the current index too so it
+ *  isn't evicted out from under the deck. */
+export function preloadSet(queue, fromIndex) {
+  if (store.castDevice || !queue || !queue.length) return;
+  // New preload target replaces any prior one.
+  _pinned.clear();
+  _preloadItems.length = 0;
+  // Pin the current track so cleanup won't evict it while preload is active.
+  const cur = queue[fromIndex];
+  if (cur) _pinned.add(_key(cur.name, cur.artist, cur.id));
+  for (let i = fromIndex; i < queue.length; i++) {
+    const item = queue[i];
+    const key = _key(item.name, item.artist, item.id);
+    _pinned.add(key);
+    _preloadItems.push({ key, item });
+    if (_cache.has(key) || _fetching.has(key) || _queue.some(q => q.key === key)) continue;
+    // priority i - fromIndex: near tracks first, far tail last (won't starve the
+    // live deck, which enqueues at priority 0 / unshifts to the front).
+    _queue.push({ item, key, priority: i - fromIndex });
+  }
+  _processNext();
+}
+
+/** Stop pinning the preload set — normal window eviction resumes. Does NOT
+ *  revoke blobs (cleanup() handles that on the next advance). */
+export function clearPreload() {
+  _pinned.clear();
+  _preloadItems.length = 0;
+}
+
+/** Preload progress for the UI: total pinned, how many are cached (done) /
+ *  fetching (loading), and the summed cached blob bytes for the ~MB estimate. */
+export function preloadStatus() {
+  let done = 0, loading = 0, bytes = 0;
+  for (const key of _pinned) {
+    if (_cache.has(key)) { done++; bytes += (_cache.get(key).size || 0); }
+    else if (_fetching.has(key)) loading++;
+  }
+  return { total: _pinned.size, done, loading, bytes };
+}
+
 function _fillQueue() {
   _fillQueueFrom(store.playerQueue, store.playerIndex, _prefetchCount());
+  // Preload survives a resume: after the normal near-window fill, re-enqueue any
+  // pinned preload targets that aren't already cached/fetching/queued (resumePrefetch
+  // cleared _queue, dropping preload entries that hadn't started yet).
+  for (const { key, item } of _preloadItems) {
+    if (_cache.has(key) || _fetching.has(key) || _queue.some(q => q.key === key)) continue;
+    _queue.push({ item, key, priority: 1000 }); // low priority: never starve the near window
+  }
 }
 
 function _fillQueueFrom(queue, currentIndex, count) {
@@ -199,7 +261,7 @@ async function _startFetch(entry) {
     // Aborted mid-flight (skip/clear deleted the _fetching entry): don't poison the
     // cache with a blob for an already-skipped track, and don't leak the object URL.
     if (controller.signal.aborted || !_fetching.has(entry.key)) { _processNext(); return; }
-    _cache.set(entry.key, { blobUrl: URL.createObjectURL(blob) });
+    _cache.set(entry.key, { blobUrl: URL.createObjectURL(blob), size: blob.size });
     state.progress = 100;
   } catch (e) {
     if (e.name !== 'AbortError') { /* network error, skip */ }
@@ -221,6 +283,9 @@ export function cleanup(queue, currentIndex) {
   }
   for (const [k] of _fetching) keepKeys.add(k);
   for (const q of _queue) keepKeys.add(q.key);
+  // Pinned preload keys are NEVER evicted while preload is active. When no preload
+  // is active _pinned is empty → this loop adds nothing → cleanup is unchanged.
+  for (const k of _pinned) keepKeys.add(k);
   for (const [k, entry] of _cache) {
     if (!keepKeys.has(k)) {
       URL.revokeObjectURL(entry.blobUrl);
