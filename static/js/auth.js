@@ -11,6 +11,7 @@ import { initUpNext } from './upnext.js';
 import { loadFavoritedArtistIds } from './favorites.js';
 import { restoreSearch } from './search.js';
 import { loadLikes } from './likes.js';
+import { initRemote, stopRemote } from './remote.js';
 
 // ── Version Check ──
 export async function checkVersion() {
@@ -42,6 +43,7 @@ export function logout() {
   $('#loginScreen').style.display = '';
   if (store.jobsInterval) clearInterval(store.jobsInterval);
   if (store.streamTokenInterval) { clearInterval(store.streamTokenInterval); store.streamTokenInterval = null; }
+  try { stopRemote(); } catch {}
 }
 
 // ── Login ──
@@ -157,6 +159,10 @@ export async function initApp() {
     // that could clobber the restored track/position).
     await getPlayerModule().then(m => m.loadQueueState());
     initUpNext().catch(() => {});
+
+    // Remote device control: connect SSE + start state reporting (needs the player
+    // module + stream token, which exist by now).
+    try { initRemote(); } catch {}
 
     // Load favorited artist IDs
     loadFavoritedArtistIds();

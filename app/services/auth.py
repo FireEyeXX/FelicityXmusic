@@ -38,16 +38,34 @@ def _ensure_data_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# mtime-keyed cache so hot read paths (e.g. the remote-control device snapshot,
+# broadcast every few seconds per device) don't re-read+parse users.json from disk
+# on every call. Safe because every mutator goes through _save_users, which refreshes
+# the cache; reads and the load→mutate→save pattern run synchronously with no awaits
+# in between, so there is no interleaving on the single-threaded event loop.
+_users_cache: dict | None = None
+_users_cache_mtime: float = -1.0
+
+
 def _load_users() -> dict:
+    global _users_cache, _users_cache_mtime
     _ensure_data_dir()
-    if USERS_FILE.exists():
-        return json.loads(USERS_FILE.read_text())
-    return {}
+    if not USERS_FILE.exists():
+        _users_cache, _users_cache_mtime = {}, -1.0
+        return _users_cache
+    mtime = USERS_FILE.stat().st_mtime
+    if _users_cache is None or mtime != _users_cache_mtime:
+        _users_cache = json.loads(USERS_FILE.read_text())
+        _users_cache_mtime = mtime
+    return _users_cache
 
 
 def _save_users(users: dict):
+    global _users_cache, _users_cache_mtime
     _ensure_data_dir()
     USERS_FILE.write_text(json.dumps(users, indent=2))
+    _users_cache = users
+    _users_cache_mtime = USERS_FILE.stat().st_mtime
 
 
 PBKDF2_ITERATIONS = 600_000  # OWASP 2023 recommendation for SHA-256

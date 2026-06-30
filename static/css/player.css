@@ -240,3 +240,22 @@ body.player-active .player-bar { display: flex; }
 .fp-artist-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
 .playlist-mode-badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: var(--accent); color: #000; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 .fp-artist-row .source-badge { font-size: 10px; padding: 2px 7px; }
+
+/* ── Remote Devices popover ── */
+.remote-devices-panel { position: fixed; right: 12px; bottom: 80px; z-index: 202; width: 300px; max-width: calc(100vw - 24px); max-height: 60vh; overflow-y: auto; background: var(--bg-card, var(--bg-elevated)); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 40px rgba(0,0,0,.5); padding: 8px; }
+.remote-devices-panel .rdp-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); padding: 6px 8px; }
+.remote-device-row { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 10px; }
+.remote-device-row + .remote-device-row { margin-top: 2px; }
+.remote-device-row .rdr-info { flex: 1; min-width: 0; }
+.remote-device-row .rdr-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.remote-device-row .rdr-track { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.remote-device-row .rdr-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+.remote-device-row .rdr-dot.online { background: #22c55e; }
+.remote-device-row .rdr-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.remote-device-row .rdr-btn { background: none; border: 1px solid var(--border); color: var(--text); cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 8px; white-space: nowrap; transition: all var(--transition); }
+.remote-device-row .rdr-btn:hover { border-color: var(--border-hover); background: rgba(255,255,255,.05); }
+.remote-device-row.controlling { background: var(--accent-dim); }
+.remote-device-row.controlling .rdr-name { color: var(--accent); }
+.remote-controlling-banner { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--accent); background: var(--accent-dim); border-bottom: 1px solid var(--border); padding: 4px 12px; }
+.remote-controlling-banner button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; }
+body.remote-active #playerDevicesBtn, body.remote-active #fpDevicesBtn { color: var(--accent); }

@@ -322,6 +322,49 @@ window._androidMediaAction = function(action) {
   }
 };
 
+// Remote control: apply a command from a controlling device to LOCAL playback
+// (this device is the target). Mirrors window._androidMediaAction above.
+// Prepare the Web Audio graph for an inbound remote play on THIS (target) device:
+// resume a suspended context and force the active deck's crossfade gain to 1 (inactive
+// to 0), mirroring loadAndPlay's cold-start path. Without this an idle target whose
+// context is suspended or whose active gain is 0 plays silently.
+// NOTE: browser autoplay policy may still keep the context suspended without a prior
+// user gesture on the target — that's an inherent limitation we can't work around here.
+function _prepareRemotePlayback() {
+  _ensureAudioContext();
+  if (_ctx && _ctx.state === 'suspended') _ctx.resume();
+  if (_activeGain()) { _activeGain().gain.cancelScheduledValues(0); _activeGain().gain.value = 1; }
+  if (_inactiveGain()) { _inactiveGain().gain.cancelScheduledValues(0); _inactiveGain().gain.value = 0; }
+}
+
+export function applyRemoteCommand(action, value) {
+  const a = getAudio();
+  switch (action) {
+    case 'play':  _prepareRemotePlayback(); a.play().catch(() => {}); updatePlayPauseIcon(true); break;
+    case 'pause': a.pause(); updatePlayPauseIcon(false); break;
+    case 'next':  nextTrack(); break;
+    case 'prev':  prevTrack(); break;
+    case 'seek':  try { a.currentTime = Number(value) || 0; } catch {} break;
+    case 'volume': {
+      const v = Math.max(0, Math.min(1, Number(value) || 0));
+      store.playerVolume = v;
+      const el = document.getElementById('playerVolume'); if (el) el.value = Math.round(v * 100);
+      const fp = document.getElementById('fpVolume'); if (fp) fp.value = Math.round(v * 100);
+      // Crossfade engine sets volume on BOTH decks (matches the #playerVolume handler).
+      _deckA.volume = v;
+      _deckB.volume = v;
+      break;
+    }
+    case 'enqueue': addToQueue(Array.isArray(value) ? value : [value], false); break;
+    case 'transfer':
+      // Play through the full engine path (loadAndPlay) so crossfade/engine features
+      // are armed for a transfer, matching next/prev. loadAndPlay handles the audio
+      // context + deck gain itself, so no separate _prepareRemotePlayback is needed.
+      loadQueueState().then(() => { loadAndPlay(); });
+      break;
+  }
+}
+
 // Called by native side when bridge is injected (may be after playback started)
 window._androidBridgeReady = function() {
   if (!_activeDeckEl().paused && _ab()) {
@@ -371,11 +414,15 @@ export function addToQueue(items, playNow = false) {
       if (parts.length) showToast(`${parts.join(', ')} → ${store.playlistMode.name}`);
     }).catch(() => {});
   }
+  if (store.remoteTarget && !playNow && store.playerIndex >= 0) {
+    document.dispatchEvent(new CustomEvent('remote:enqueue', { detail: items }));
+  }
 }
 
 // ── Load and Play Current Track ──
 export async function loadAndPlay() {
   if (store.playerIndex < 0 || store.playerIndex >= store.playerQueue.length) return;
+  if (store.remoteTarget) { try { getAudio().currentTime = 0; } catch {} document.dispatchEvent(new Event('remote:play')); return; }
   // Abort prefetch downloads — current track gets all bandwidth
   abortPrefetch();
   _crossfadeTriggered = false;
@@ -662,6 +709,13 @@ function _nextTrackInQueue() {
 // ── Play a track from recommendations (virtual, not in queue) ──
 let _currentRecItem = null;
 export async function playRecTrack(item) {
+  if (store.remoteTarget) {
+    store.playerQueue = store.playerQueue.concat([item]);
+    store.playerIndex = store.playerQueue.length - 1;
+    try { getAudio().currentTime = 0; } catch {}
+    document.dispatchEvent(new Event('remote:play'));
+    return;
+  }
   _currentRecItem = item;
   $('#playerImg').src = item.image || '';
   $('#playerTitle').textContent = item.name || '';
@@ -737,10 +791,10 @@ function updateMediaSessionWith(item) {
     title: item.name || '', artist: item.artist || '', album: item.album || '',
     artwork: item.image ? [{ src: item.image, sizes: '300x300', type: 'image/jpeg' }] : [],
   });
-  navigator.mediaSession.setActionHandler('play', () => _activeDeckEl().play());
-  navigator.mediaSession.setActionHandler('pause', () => _activeDeckEl().pause());
-  navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
-  navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
+  navigator.mediaSession.setActionHandler('play', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'play' } })); return; } _activeDeckEl().play(); });
+  navigator.mediaSession.setActionHandler('pause', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'pause' } })); return; } _activeDeckEl().pause(); });
+  navigator.mediaSession.setActionHandler('previoustrack', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'prev' } })); return; } prevTrack(); });
+  navigator.mediaSession.setActionHandler('nexttrack', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'next' } })); return; } nextTrack(); });
 }
 
 export function prevTrack() {
@@ -776,6 +830,8 @@ export function updatePlayPauseIcon(playing) {
   const fpIcon = $('#fpPlayPauseIcon');
   if (fpIcon) fpIcon.innerHTML = playing ? pausePath : playPath;
 }
+
+export function pauseLocal() { try { _deckA.pause(); _deckB.pause(); } catch {} updatePlayPauseIcon(false); }
 
 // ── Resolve Item Tracks (album/artist → track list) ──
 export async function resolveItemTracks(item) {
@@ -876,10 +932,10 @@ function updateMediaSession() {
     title: item.name || '', artist: item.artist || '', album: item.album || '',
     artwork: item.image ? [{ src: item.image, sizes: '300x300', type: 'image/jpeg' }] : [],
   });
-  navigator.mediaSession.setActionHandler('play', () => _activeDeckEl().play());
-  navigator.mediaSession.setActionHandler('pause', () => _activeDeckEl().pause());
-  navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
-  navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
+  navigator.mediaSession.setActionHandler('play', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'play' } })); return; } _activeDeckEl().play(); });
+  navigator.mediaSession.setActionHandler('pause', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'pause' } })); return; } _activeDeckEl().pause(); });
+  navigator.mediaSession.setActionHandler('previoustrack', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'prev' } })); return; } prevTrack(); });
+  navigator.mediaSession.setActionHandler('nexttrack', () => { if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'next' } })); return; } nextTrack(); });
 }
 
 // ── Audio Element Reference (exported for other modules) ──
@@ -1217,6 +1273,7 @@ export function init() {
     switch (e.code) {
       case 'Space':
         e.preventDefault();
+        if (store.remoteTarget) { document.dispatchEvent(new CustomEvent('remote:cmd', { detail: { action: 'toggle' } })); return; }
         if (store.castDevice) {
           if (store.playerPlaying) apiJson('/api/dlna/pause', { method: 'POST' }).then(() => updatePlayPauseIcon(false)).catch(() => {});
           else apiJson('/api/dlna/play', { method: 'POST' }).then(() => updatePlayPauseIcon(true)).catch(() => {});

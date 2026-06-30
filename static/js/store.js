@@ -120,6 +120,13 @@ export const store = {
   castDevice: null, // { id, name } or null
   castPollTimer: null,
 
+  // ── Remote Control ──
+  remoteEventSource: null,
+  remoteStateTimer: null,
+  remoteDevices: {},
+  remoteTarget: null,
+  remoteReconnectTimer: null,
+
   // ── Full Player ──
   fullPlayerOpen: false,
   shuffleEnabled: false,
