@@ -155,6 +155,14 @@ async def add_track_by_name(playlist_id: str, req: AddTrackByNameRequest, user: 
     song_id = await library.find_song_id(req.name, req.artist, req.album)
     if not song_id:
         raise HTTPException(404, "Track not found in Navidrome library")
+    # Dedup: skip the add if the track is already in the playlist. Fetch is
+    # best-effort — if get_playlist fails, fall back to adding (don't 500).
+    try:
+        pl = await library.get_playlist(playlist_id)
+        if pl and any(t.get("id") == song_id for t in pl.get("tracks", [])):
+            return {"status": "ok", "song_id": song_id, "skipped": True}
+    except Exception:
+        pass
     ok = await library.update_playlist(playlist_id, song_ids_to_add=[song_id])
     if not ok:
         raise HTTPException(500, "Failed to add track")

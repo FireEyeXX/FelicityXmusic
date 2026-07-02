@@ -309,6 +309,7 @@ async def get_playlists() -> list[dict]:
                 "name": p.get("name", ""),
                 "songCount": p.get("songCount", 0),
                 "duration": p.get("duration", 0),
+                "changed": p.get("changed", ""),  # ISO mtime — used by gc_temp_playlists recency sort
                 "coverArt": p.get("coverArt", ""),
                 "image": f"/api/library/cover/{p['coverArt']}" if p.get("coverArt") else "",
             }
@@ -472,6 +473,7 @@ def _cover_params() -> str:
 UPNEXT_PREFIX = "__upnext_"
 RADIO_PREFIX = "__radio_"
 TEMP_PREFIXES = (UPNEXT_PREFIX, RADIO_PREFIX)
+TEMP_PLAYLIST_KEEP = 8
 
 
 def upnext_name(username: str, device_id: str) -> str:
@@ -517,12 +519,47 @@ async def get_or_create_temp_playlist(target_name: str) -> dict | None:
     return full or {"id": new_id, "name": target_name, "tracks": [], "songCount": 0}
 
 
+async def gc_temp_playlists(username: str, prefix: str, keep: int = TEMP_PLAYLIST_KEEP,
+                            keep_id: str | None = None) -> None:
+    """Best-effort GC: cap how many temp playlists a user keeps per type.
+
+    Selects playlists whose name startswith `prefix + username + "_"` (scopes
+    precisely to the same user+type; the trailing `_` avoids matching a
+    different user like `username2`), sorts by `changed` DESC (newest first;
+    missing `changed` treated as oldest), keeps the newest `keep`, ALWAYS keeps
+    `keep_id`, and deletes the rest. Never raises — swallows all errors so it
+    can't break /upnext or /radio."""
+    try:
+        scope = f"{prefix}{username}_"
+        playlists = await get_playlists()
+        mine = [p for p in playlists if (p.get("name") or "").startswith(scope)]
+        # Newest first; missing/empty `changed` sorts as oldest.
+        mine.sort(key=lambda p: p.get("changed") or "", reverse=True)
+        stale = mine[keep:]
+        for p in stale:
+            pid = p.get("id")
+            if not pid or pid == keep_id:
+                continue
+            try:
+                await delete_playlist(pid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def get_or_create_upnext(username: str, device_id: str) -> dict | None:
-    return await get_or_create_temp_playlist(upnext_name(username, device_id))
+    pl = await get_or_create_temp_playlist(upnext_name(username, device_id))
+    await gc_temp_playlists(username, UPNEXT_PREFIX, keep=TEMP_PLAYLIST_KEEP,
+                            keep_id=pl.get("id") if pl else None)
+    return pl
 
 
 async def get_or_create_radio(username: str, device_id: str) -> dict | None:
-    return await get_or_create_temp_playlist(radio_name(username, device_id))
+    pl = await get_or_create_temp_playlist(radio_name(username, device_id))
+    await gc_temp_playlists(username, RADIO_PREFIX, keep=TEMP_PLAYLIST_KEEP,
+                            keep_id=pl.get("id") if pl else None)
+    return pl
 
 
 async def replace_playlist_by_names(playlist_id: str, tracks: list[dict]) -> dict:
