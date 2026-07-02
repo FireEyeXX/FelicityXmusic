@@ -335,6 +335,13 @@ export function init() {
         showToast(`Saved as "${name.trim()}"`);
       } else {
         // Already in a named playlist — fall back to the legacy create-and-copy.
+        // Guard against name collision: creating is idempotent by name, so re-using
+        // an existing name would append the whole queue to that playlist (doubling it).
+        const existing = await apiJson('/api/library/playlists');
+        if ((existing.playlists || []).some(p => p.name === name.trim())) {
+          showToast(`Playlist "${name.trim()}" už existuje — zvol jiný název`);
+          return;
+        }
         await apiJson('/api/library/playlist', { method: 'POST', body: { name: name.trim() } });
         const data = await apiJson('/api/library/playlists');
         const pl = (data.playlists || []).find(p => p.name === name.trim());
