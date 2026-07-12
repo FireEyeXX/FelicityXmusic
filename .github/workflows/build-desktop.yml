@@ -153,6 +153,11 @@ jobs:
             rsvg-convert -w $size -h $size icon.svg > icon_${size}.png
           done
           cp icon_512.png icon.png
+          # bundle.icon in tauri.conf.json lists icon.icns unconditionally (macOS
+          # target) — the Linux bundler checks every listed path EXISTS before
+          # picking what it actually needs for appimage, so a placeholder (never
+          # parsed as real ICNS on this platform) satisfies that check.
+          cp icon_512.png icon.icns
 
       - name: Install dependencies
         working-directory: desktop
