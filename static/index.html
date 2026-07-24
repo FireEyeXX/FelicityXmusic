@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>MusicSeeker</title>
+<title>FelicityX</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=__CACHE_BUST__">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -103,7 +103,7 @@
         <circle cx="18" cy="16" r="3" fill="var(--accent)" stroke="none"/>
       </svg>
     </div>
-    <div class="logo-text">MusicSeeker</div>
+    <div class="logo-text">FelicityX</div>
     <p>Sign in to continue</p>
     <form id="loginForm" action="javascript:void(0)" method="post">
       <input id="loginUser" type="text" name="username" placeholder="Username" autocomplete="username">
@@ -118,17 +118,17 @@
 <div id="appContainer" style="display:none;">
 
 <nav>
-  <button class="nav-btn active" data-page="search">Search</button>
+  <button class="nav-btn active" data-page="search">Buscar</button>
   <button class="nav-btn" data-page="discover">Discover</button>
-  <button class="nav-btn" data-page="library">Library</button>
+  <button class="nav-btn" data-page="library">Libreria</button>
   <button class="nav-btn" data-page="playlists">My Spotify</button>
-  <button class="nav-btn" data-page="podcasts">My Podcasts</button>
-  <button class="nav-btn" data-page="favorites">Favorites</button>
-  <button class="nav-btn" data-page="settings">Settings</button>
+  <button class="nav-btn" data-page="podcasts">Mis Podcasts</button>
+  <button class="nav-btn" data-page="favorites">Favoritos</button>
+  <button class="nav-btn" data-page="settings">Configuracion</button>
   <div class="nav-spacer"></div>
   <button class="downloads-btn" id="downloadsToggle">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Downloads
+    Descargas
     <span class="badge" id="jobsBadge"></span>
   </button>
   <div class="nav-user">
@@ -141,7 +141,7 @@
 <div class="bottom-nav" id="bottomNav">
   <button class="bnav-btn active" data-page="search">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    Search
+    Buscar
   </button>
   <button class="bnav-btn" data-page="discover">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
@@ -149,7 +149,7 @@
   </button>
   <button class="bnav-btn" data-page="library">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-    Library
+    Libreria
   </button>
   <button class="bnav-btn" data-page="playlists">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -161,16 +161,16 @@
   </button>
   <button class="bnav-btn" data-page="favorites">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-    Favorites
+    Favoritos
   </button>
   <button class="bnav-btn" data-page="downloads" id="bnavDownloads">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
     <span class="bnav-badge" id="jobsBadgeMobile"></span>
-    Downloads
+    Descargas
   </button>
   <button class="bnav-btn" data-page="settings">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-    Settings
+    Configuracion
   </button>
   <button class="bnav-btn bnav-now-playing" id="bnavNowPlaying" style="display:none;">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -193,16 +193,16 @@
     </div>
     <div class="mic-status" id="micStatus"></div>
     <div class="type-toggle">
-      <button class="type-btn active" data-type="track">Tracks</button>
+      <button class="type-btn active" data-type="track">Canciones</button>
       <button class="type-btn" data-type="album">Albums</button>
-      <button class="type-btn" data-type="artist">Artists</button>
+      <button class="type-btn" data-type="artist">Artistas</button>
       <button class="type-btn" data-type="playlist">Playlists</button>
       <button class="type-btn" data-type="show">Podcasts</button>
     </div>
     <div id="recentSearches" class="recent-searches" style="display:none;"></div>
   </div>
   <div class="recognize-result" id="recognizeResult">
-    <div class="rr-label" id="rrLabel">Song identified</div>
+    <div class="rr-label" id="rrLabel">Cancion identificada</div>
     <div class="rr-header">
       <img class="rr-img" id="rrImg" src="">
       <div class="rr-info">
@@ -210,8 +210,8 @@
         <div class="rr-artist" id="rrArtist"></div>
       </div>
       <div class="rr-actions">
-        <button class="rr-btn rr-btn-download" id="rrDownload">Download</button>
-        <button class="rr-btn rr-btn-search" id="rrSearch">Search</button>
+        <button class="rr-btn rr-btn-download" id="rrDownload">Descarga</button>
+        <button class="rr-btn rr-btn-search" id="rrSearch">Busqueda</button>
         <button class="rr-btn-close" id="rrClose">&times;</button>
       </div>
     </div>
@@ -221,7 +221,7 @@
     <div class="skeleton" style="height:40px; width:200px; margin:0 auto;"></div>
   </div>
   <div id="showDetail" style="display:none; margin-top:24px;">
-    <button id="backToSearch" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back to results</button>
+    <button id="backToSearch" class="tag-back-btn" style="margin-bottom:18px;">&larr; Voler a los resultados</button>
     <div class="playlist-hero">
       <img id="showDetailImg" class="playlist-hero-img" src="">
       <div class="playlist-hero-info">
@@ -230,14 +230,14 @@
         <p id="showDetailCount"></p>
       </div>
       <div class="playlist-hero-actions" style="display:flex;gap:8px;">
-        <button class="btn-download" id="downloadShow" style="width:auto; padding:12px 28px;">Download All</button>
-        <button class="btn-check-new" id="subscribeShow" style="padding:12px 20px;font-size:14px;">Subscribe</button>
+        <button class="btn-download" id="downloadShow" style="width:auto; padding:12px 28px;">Descargar todo</button>
+        <button class="btn-check-new" id="subscribeShow" style="padding:12px 20px;font-size:14px;">Suscribete</button>
       </div>
     </div>
     <div id="showEpisodes" class="grid"></div>
   </div>
   <div id="artistDetail" style="display:none; margin-top:24px;">
-    <button id="backFromArtist" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back to results</button>
+    <button id="backFromArtist" class="tag-back-btn" style="margin-bottom:18px;">&larr; Volver a los resultados</button>
     <div class="playlist-hero">
       <img id="artistDetailImg" class="playlist-hero-img" src="" style="border-radius:50%;">
       <div class="playlist-hero-info">
@@ -245,13 +245,13 @@
         <p id="artistDetailCount"></p>
       </div>
       <div class="playlist-hero-actions">
-        <button class="btn-download" id="downloadArtist" style="width:auto; padding:12px 28px;">Download All Albums</button>
+        <button class="btn-download" id="downloadArtist" style="width:auto; padding:12px 28px;">Descargar todos los albums</button>
       </div>
     </div>
     <div id="artistAlbums" class="grid"></div>
   </div>
   <div id="albumDetail" style="display:none; margin-top:24px;">
-    <button id="backFromAlbum" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
+    <button id="backFromAlbum" class="tag-back-btn" style="margin-bottom:18px;">&larr; Atras</button>
     <div class="playlist-hero">
       <img id="albumDetailImg" class="playlist-hero-img" src="">
       <div class="playlist-hero-info">
@@ -260,10 +260,10 @@
         <p id="albumDetailCount"></p>
       </div>
       <div class="playlist-hero-actions">
-        <button class="btn-download" id="playAlbum" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
-        <button class="btn-download" id="shuffleAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">&#128256; Shuffle</button>
-        <button class="btn-download" id="queueAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Add All</button>
-        <button class="btn-download" id="downloadAlbum" style="width:auto; padding:12px 28px;">Download All</button>
+        <button class="btn-download" id="playAlbum" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Reproducir todo</button>
+        <button class="btn-download" id="shuffleAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">&#128256; Reproduccion Aleatoria</button>
+        <button class="btn-download" id="queueAlbum" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Agregar todo</button>
+        <button class="btn-download" id="downloadAlbum" style="width:auto; padding:12px 28px;">Descargar Todo</button>
       </div>
     </div>
     <div id="albumTracks" class="grid"></div>
@@ -282,19 +282,19 @@
   </div>
   <div id="tagDetailView" style="display:none;">
     <div class="tag-detail-header">
-      <button class="tag-back-btn" id="backToTags">&larr; Back</button>
+      <button class="tag-back-btn" id="backToTags">&larr; Atras</button>
       <h2 id="tagDetailName" style="font-size:20px; font-weight:700;"></h2>
     </div>
     <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap;">
       <div class="type-toggle">
-        <button class="type-btn active" data-tagtype="track">Tracks</button>
+        <button class="type-btn active" data-tagtype="track">Canciones</button>
         <button class="type-btn" data-tagtype="album">Albums</button>
-        <button class="type-btn" data-tagtype="artist">Artists</button>
+        <button class="type-btn" data-tagtype="artist">Artistas</button>
       </div>
       <div class="type-toggle" id="tagNovelty">
-        <button class="type-btn active" data-novelty="">All</button>
-        <button class="type-btn" data-novelty="new">New to me</button>
-        <button class="type-btn" data-novelty="library">In library</button>
+        <button class="type-btn active" data-novelty="">Todo</button>
+        <button class="type-btn" data-novelty="new">Nuevo para mi</button>
+        <button class="type-btn" data-novelty="library">En libreria</button>
       </div>
       <div class="type-toggle" id="tagDepth">
         <button class="type-btn active" data-depth="">Popular</button>
@@ -313,24 +313,24 @@
 <main id="pageLibrary" style="display:none">
   <div id="libraryList">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
-      <h2 class="page-title" style="margin:0;">My Library</h2>
-      <button id="newLibPlaylist" class="btn-check-new">+ New Playlist</button>
+      <h2 class="page-title" style="margin:0;">Mi Libreria</h2>
+      <button id="newLibPlaylist" class="btn-check-new">+ Nueva Playlist</button>
     </div>
     <div class="card lib-card" id="likedSongsTile" style="margin-bottom:18px;">
       <div class="card-img" style="background:linear-gradient(135deg,#1db954,#1a1a2e);display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff;">&#9829;</div>
       <div class="card-body">
-        <div class="card-title">Liked Songs</div>
+        <div class="card-title">Me Gusta</div>
         <div class="card-sub" id="likedSongsCount"></div>
       </div>
     </div>
     <div id="libraryGrid" class="grid"></div>
   </div>
   <div id="likedSongsDetail" style="display:none; margin-top:24px;">
-    <button id="backToLibraryFromLiked" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
+    <button id="backToLibraryFromLiked" class="tag-back-btn" style="margin-bottom:18px;">&larr; Atras</button>
     <div class="playlist-hero">
       <div id="likedHeroImg" class="playlist-hero-img" style="background:linear-gradient(135deg,#1db954,#1a1a2e);display:flex;align-items:center;justify-content:center;font-size:48px;color:#fff;">&#9829;</div>
       <div class="playlist-hero-info">
-        <h2>Liked Songs</h2>
+        <h2>Me Gusta</h2>
         <p id="likedDetailCount"></p>
       </div>
       <div class="playlist-hero-actions">
@@ -341,7 +341,7 @@
     <div id="likedSongsTracks" class="grid"></div>
   </div>
   <div id="libraryDetail" style="display:none; margin-top:24px;">
-    <button id="backToLibrary" class="tag-back-btn" style="margin-bottom:18px;">&larr; Back</button>
+    <button id="backToLibrary" class="tag-back-btn" style="margin-bottom:18px;">&larr; Atras</button>
     <div class="playlist-hero">
       <img id="libDetailImg" class="playlist-hero-img" src="">
       <div class="playlist-hero-info">
@@ -349,12 +349,12 @@
         <p id="libDetailCount"></p>
       </div>
       <div class="playlist-hero-actions">
-        <button class="btn-download" id="playLibPlaylist" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Play All</button>
-        <button class="btn-download" id="queueLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Add All</button>
-        <button class="btn-download" id="renameLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Rename</button>
-        <button class="btn-download" id="duplicateLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Duplicate</button>
-        <button class="btn-download" id="mergeLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Merge</button>
-        <button class="btn-download" id="deleteLibPlaylist" style="width:auto; padding:12px 28px; background:#ef4444; color:#fff;">Delete</button>
+        <button class="btn-download" id="playLibPlaylist" style="width:auto; padding:12px 28px; background:var(--accent); color:#000;">&#9654; Reproducir Todo</button>
+        <button class="btn-download" id="queueLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">+ Agregar Todo</button>
+        <button class="btn-download" id="renameLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Renombrar</button>
+        <button class="btn-download" id="duplicateLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Duplicar</button>
+        <button class="btn-download" id="mergeLibPlaylist" style="width:auto; padding:12px 28px; background:var(--bg-elevated); color:var(--text); border:1px solid var(--border);">Combinar</button>
+        <button class="btn-download" id="deleteLibPlaylist" style="width:auto; padding:12px 28px; background:#ef4444; color:#fff;">Eliminar</button>
       </div>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
