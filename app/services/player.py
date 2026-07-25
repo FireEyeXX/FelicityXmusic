@@ -280,7 +280,7 @@ async def _resolve_youtube(name: str, artist: str) -> dict | None:
     try:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp", "-f", "bestaudio", "--print", "url",
-            "--no-playlist", f"ytsearch1:{query}",
+            "--no-playlist", "--cookies", "cookies.txt", f"ytsearch1:{query}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
