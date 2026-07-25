@@ -221,7 +221,7 @@ def _ytmusic_search_sync(query: str, search_type: str, limit: int) -> list[dict]
     if not yt_filter:
         return []
 
-    raw = yt.search(query, filter="songs", limit=10)
+    raw = yt.search(query, filter=yt_filter, limit=limit)
     results = []
     for item in raw:
         if search_type == "track":
