@@ -202,6 +202,7 @@ async def _download_track_ytdlp(artist: str, title: str, album: str, fmt: str,
         "--audio-quality", "0",
         "--no-embed-metadata",
         "--no-playlist",
+        "--cookies", "cookies.txt",
         "-o", out_template,
     ]
 
